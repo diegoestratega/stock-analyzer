@@ -99,7 +99,6 @@ class FMPClient:
             "eps_growth_quarterly_yoy": round(eps_growth_qyoy, 2)
         }
 
-
 # --- 3. SCORING LOGIC ---
 class StockScorer:
     def scale(self, val, min_val, max_val, lower_is_better=False):
@@ -158,45 +157,28 @@ class StockScorer:
 
         return round(total_score, 1), score_details
 
-
 # --- 4. VERCEL NATIVE HANDLER ---
 class handler(BaseHTTPRequestHandler):
-
     def _set_headers(self):
         self.send_response(200)
         self.send_header('Content-type', 'application/json')
-        # Allow Cross-Origin requests
         self.send_header('Access-Control-Allow-Origin', '*')
         self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
         self.send_header('Access-Control-Allow-Headers', 'Content-Type')
         self.end_headers()
 
-    # Handle Preflight OPTIONS requests for CORS
     def do_OPTIONS(self):
         self._set_headers()
         return
 
-    # Handle standard GET requests just in case (fallback)
     def do_GET(self):
         self._set_headers()
-        
-        parsed_url = urlparse(self.path)
-        query_params = parse_qs(parsed_url.query)
-        
-        ticker_list = query_params.get('ticker', [])
-        ticker = ticker_list[0].strip().upper() if ticker_list else None
-        
-        if not ticker:
-            self.wfile.write(json.dumps({"detail": "This endpoint requires a POST request with a JSON body containing a 'ticker' field."}).encode('utf-8'))
-            return
-            
-        self._process_ticker(ticker)
+        self.wfile.write(json.dumps({"detail": "Analyze endpoint running. Send a POST request with {'ticker': 'AAPL'} to get data."}).encode('utf-8'))
+        return
 
-    # Main POST logic to reliably capture the payload body
     def do_POST(self):
         self._set_headers()
         ticker = None
-        
         try:
             content_length = int(self.headers.get('Content-Length', 0))
             if content_length > 0:
@@ -213,7 +195,6 @@ class handler(BaseHTTPRequestHandler):
             
         self._process_ticker(ticker)
 
-    # Core execution function (called by both GET and POST)
     def _process_ticker(self, ticker):
         fmp = FMPClient()
         scorer = StockScorer()
@@ -222,7 +203,6 @@ class handler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps({"detail": "API Client failed to initialize. Check Vercel Env Vars."}).encode('utf-8'))
             return
 
-        # Fetch and score
         fundamentals = fmp.get_fundamentals(ticker)
         if not fundamentals or fundamentals.get('price', 0) == 0:
             self.wfile.write(json.dumps({"detail": f"Could not find fundamental data for {ticker}"}).encode('utf-8'))
@@ -230,7 +210,6 @@ class handler(BaseHTTPRequestHandler):
 
         total_score, score_breakdown = scorer.evaluate(fundamentals)
 
-        # Return JSON
         response_data = {
             "ticker": ticker,
             "score": total_score,
@@ -243,5 +222,4 @@ class handler(BaseHTTPRequestHandler):
                 "debt_to_equity": fundamentals.get("debt_to_equity")
             }
         }
-        
         self.wfile.write(json.dumps(response_data).encode('utf-8'))

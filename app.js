@@ -5,11 +5,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const loadingDiv = document.getElementById('loading');
     const errorDiv = document.getElementById('error');
 
-    // Execute analysis when enter key is pressed
     tickerInput.addEventListener('keypress', function(e) {
-        if (e.key === 'Enter') {
-            analyzeStock();
-        }
+        if (e.key === 'Enter') analyzeStock();
     });
 
     analyzeBtn.addEventListener('click', analyzeStock);
@@ -21,18 +18,15 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
-        // Reset UI state
         resultsDiv.style.display = 'none';
         errorDiv.style.display = 'none';
         loadingDiv.style.display = 'block';
         
         try {
-            // Using POST to absolutely guarantee Vercel doesn't strip the ticker
-            const response = await fetch(`/api/index`, {
+            // Updated to securely hit the new /api/analyze endpoint
+            const response = await fetch(`/api/analyze`, {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ ticker: ticker })
             });
             
@@ -53,7 +47,6 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function displayResults(data, ticker) {
-        // Build Top Metrics
         document.getElementById('stockTitle').textContent = `${ticker} Fundamental Analysis`;
         
         const metricsHtml = `
@@ -81,14 +74,8 @@ document.addEventListener('DOMContentLoaded', () => {
             </div>
         `;
         document.getElementById('metricsContainer').innerHTML = metricsHtml;
-
-        // Render TradingView Chart
         renderTradingViewChart(ticker);
-
-        // Build Score Breakdown
         renderScoreBreakdown(data.score, data.score_breakdown);
-
-        // Show Results Container
         resultsDiv.style.display = 'block';
     }
 
@@ -120,17 +107,10 @@ document.addEventListener('DOMContentLoaded', () => {
     function renderScoreBreakdown(totalScore, breakdown) {
         const scoreContainer = document.getElementById('scoreContainer');
         
-        // Determine main color
-        let mainColor = '#f44336'; // Red
+        let mainColor = '#f44336'; 
         let recommendation = 'Strong Sell';
-        
-        if (totalScore >= 70) {
-            mainColor = '#4caf50'; // Green
-            recommendation = 'Strong Buy';
-        } else if (totalScore >= 20) {
-            mainColor = '#ffeb3b'; // Yellow
-            recommendation = 'Hold / Neutral';
-        }
+        if (totalScore >= 70) { mainColor = '#4caf50'; recommendation = 'Strong Buy'; } 
+        else if (totalScore >= 20) { mainColor = '#ffeb3b'; recommendation = 'Hold / Neutral'; }
 
         let breakdownHtml = `
             <div class="score-header" style="color: ${mainColor}">
@@ -140,19 +120,13 @@ document.addEventListener('DOMContentLoaded', () => {
             <div class="score-list">
         `;
 
-        // Sort breakdown from highest weight to lowest
         const sortedBreakdown = Object.entries(breakdown).sort((a, b) => b[1].weight - a[1].weight);
 
         sortedBreakdown.forEach(([key, value]) => {
-            // Determine ball color for individual metric
-            let ballColor = '#f44336'; // Red
+            let ballColor = '#f44336';
             const percentage = (value.awarded / value.weight) * 100;
-            
-            if (percentage >= 70) {
-                ballColor = '#4caf50'; // Green
-            } else if (percentage >= 20) {
-                ballColor = '#ffeb3b'; // Yellow
-            }
+            if (percentage >= 70) ballColor = '#4caf50';
+            else if (percentage >= 20) ballColor = '#ffeb3b';
 
             breakdownHtml += `
                 <div class="score-item">
