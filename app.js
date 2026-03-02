@@ -7,8 +7,8 @@ async function analyzeTicker() {
     resultDiv.innerHTML = "Analyzing...";
 
     try {
-        // Updated to the clean Vercel zero-config path
-        const response = await fetch('/api/index', {
+        // EXACT PATH to prevent Vercel 308 Redirect which strips POST payloads
+        const response = await fetch('/api/index.py', {
             method: 'POST',
             headers: { 
                 'Content-Type': 'application/json' 
