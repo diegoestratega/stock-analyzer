@@ -1,19 +1,8 @@
 {
   "rewrites": [
     {
-      "source": "/api/(.*)",
+      "source": "/api/:path*",
       "destination": "/api/index.py"
-    }
-  ],
-  "headers": [
-    {
-      "source": "/app.js",
-      "headers": [
-        {
-          "key": "Cache-Control",
-          "value": "public, max-age=31536000, immutable"
-        }
-      ]
     }
   ]
 }
