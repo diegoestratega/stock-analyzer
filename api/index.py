@@ -176,11 +176,10 @@ try:
 except Exception as e:
     fmp = None
 
-# Using {path:path} captures any URL structure Vercel throws at it
-@app.get("/{path:path}")
-async def analyze_stock(path: str):
-    # Extract the ticker from the very end of the URL (e.g., from "api/analyze/AAPL")
-    ticker = path.split("/")[-1].upper()
+@app.get("/api/analyze/{ticker}")
+@app.get("/analyze/{ticker}")
+async def analyze_stock(ticker: str):
+    ticker = ticker.strip().upper()
     
     if not ticker:
         raise HTTPException(status_code=400, detail="No ticker provided")
