@@ -1,26 +1,15 @@
 import os
+import json
 import requests
 import yfinance as yf
+from urllib.parse import parse_qs, urlparse
+from http.server import BaseHTTPRequestHandler
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
 
 # --- 1. CONFIG & SETUP ---
 load_dotenv()
 FMP_API_KEY = os.getenv("FMP_API_KEY")
 BASE_URL = "https://financialmodelingprep.com/api/v3/"
-
-# Using root_path ensures FastAPI knows it's running behind Vercel's /api/ route
-app = FastAPI(title="Stock Fundamentals Analyzer", root_path="/api")
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 
 # --- 2. FMP CLIENT LOGIC ---
 class FMPClient:
@@ -170,40 +159,65 @@ class StockScorer:
         return round(total_score, 1), score_details
 
 
-# --- 4. FASTAPI ROUTES ---
-try:
-    fmp = FMPClient()
-    scorer = StockScorer()
-except Exception as e:
-    fmp = None
+# --- 4. VERCEL NATIVE HANDLER ---
+class handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        # Setup response headers immediately
+        self.send_response(200)
+        self.send_header('Content-type', 'application/json')
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.end_headers()
 
-# Using a standard query parameter prevents Vercel from mangling the path parameter
-@app.get("/analyze")
-async def analyze_stock(ticker: str):
-    ticker = ticker.strip().upper()
-    
-    if not ticker:
-        raise HTTPException(status_code=400, detail="No ticker provided")
+        # Parse the URL exactly as Vercel sends it
+        parsed_url = urlparse(self.path)
+        query_params = parse_qs(parsed_url.query)
         
-    if not fmp:
-        raise HTTPException(status_code=500, detail="API Client failed to initialize.")
-    
-    fundamentals = fmp.get_fundamentals(ticker)
-    
-    if not fundamentals or fundamentals.get('price', 0) == 0:
-        raise HTTPException(status_code=404, detail=f"Could not find fundamental data for {ticker}")
+        # Look for the ticker in the query parameter ?ticker=AAPL
+        ticker_list = query_params.get('ticker', [])
+        
+        if not ticker_list:
+            # If no query parameter, check if it was sent as part of the path (e.g., /api/index/AAPL)
+            path_parts = [p for p in parsed_url.path.split('/') if p]
+            if path_parts and path_parts[-1].upper() != 'INDEX':
+                ticker = path_parts[-1].strip().upper()
+            else:
+                self.wfile.write(json.dumps({"detail": "No ticker provided in URL"}).encode('utf-8'))
+                return
+        else:
+            ticker = ticker_list[0].strip().upper()
 
-    total_score, score_breakdown = scorer.evaluate(fundamentals)
+        if not ticker:
+            self.wfile.write(json.dumps({"detail": "Invalid ticker"}).encode('utf-8'))
+            return
+            
+        fmp = FMPClient()
+        scorer = StockScorer()
 
-    return {
-        "ticker": ticker,
-        "score": total_score,
-        "score_breakdown": score_breakdown,
-        "metrics": {
-            "forward_pe": fundamentals.get("pe_forward"),
-            "dividend_yield": fundamentals.get("dividend_yield") / 100 if fundamentals.get("dividend_yield") else None,
-            "revenue_growth": fundamentals.get("revenue_growth_quarterly_yoy") / 100 if fundamentals.get("revenue_growth_quarterly_yoy") else None,
-            "price_to_book": fundamentals.get("price_to_book"),
-            "debt_to_equity": fundamentals.get("debt_to_equity")
+        if not fmp.api_key:
+            self.wfile.write(json.dumps({"detail": "API Client failed to initialize. Check Vercel Env Vars."}).encode('utf-8'))
+            return
+
+        # Fetch and score
+        fundamentals = fmp.get_fundamentals(ticker)
+        if not fundamentals or fundamentals.get('price', 0) == 0:
+            self.wfile.write(json.dumps({"detail": f"Could not find fundamental data for {ticker}"}).encode('utf-8'))
+            return
+
+        total_score, score_breakdown = scorer.evaluate(fundamentals)
+
+        # Return JSON
+        response_data = {
+            "ticker": ticker,
+            "score": total_score,
+            "score_breakdown": score_breakdown,
+            "metrics": {
+                "forward_pe": fundamentals.get("pe_forward"),
+                "dividend_yield": fundamentals.get("dividend_yield") / 100 if fundamentals.get("dividend_yield") else None,
+                "revenue_growth": fundamentals.get("revenue_growth_quarterly_yoy") / 100 if fundamentals.get("revenue_growth_quarterly_yoy") else None,
+                "price_to_book": fundamentals.get("price_to_book"),
+                "debt_to_equity": fundamentals.get("debt_to_equity")
+            }
         }
-    }
+        
+        self.wfile.write(json.dumps(response_data).encode('utf-8'))
+        return
