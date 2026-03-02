@@ -2,7 +2,6 @@ import os
 import json
 import requests
 import yfinance as yf
-from urllib.parse import parse_qs, urlparse
 from http.server import BaseHTTPRequestHandler
 from dotenv import load_dotenv
 
@@ -161,7 +160,7 @@ class StockScorer:
 
 # --- 4. VERCEL NATIVE HANDLER ---
 class handler(BaseHTTPRequestHandler):
-    def do_GET(self):
+    def do_POST(self):
         # Setup response headers immediately
         self.send_response(200)
         self.send_header('Content-type', 'application/json')
@@ -170,26 +169,19 @@ class handler(BaseHTTPRequestHandler):
 
         ticker = None
         
-        # Parse the raw URL path directly
-        raw_path = self.path
-        
-        # Method 1: Check for explicit query parameter (e.g. /api/index?ticker=AAPL)
-        if '?' in raw_path:
-            query_string = raw_path.split('?')[1]
-            query_params = parse_qs(query_string)
-            if 'ticker' in query_params:
-                ticker = query_params['ticker'][0].strip().upper()
+        try:
+            # Read the payload from the POST request body
+            content_length = int(self.headers.get('Content-Length', 0))
+            if content_length > 0:
+                post_data = self.rfile.read(content_length).decode('utf-8')
+                body = json.loads(post_data)
+                ticker = body.get('ticker', '').strip().upper()
+        except Exception as e:
+            self.wfile.write(json.dumps({"detail": f"Error parsing body: {str(e)}"}).encode('utf-8'))
+            return
 
-        # Method 2: Check if it was appended as a path folder (e.g. /api/index/AAPL)
         if not ticker:
-            path_parts = [p for p in raw_path.split('?')[0].split('/') if p]
-            if path_parts and path_parts[-1].upper() not in ['API', 'INDEX', 'INDEX.PY']:
-                ticker = path_parts[-1].strip().upper()
-
-        # If we still don't have a ticker, fail gracefully.
-        if not ticker:
-            error_msg = {"detail": f"No ticker provided. Raw path received: {raw_path}"}
-            self.wfile.write(json.dumps(error_msg).encode('utf-8'))
+            self.wfile.write(json.dumps({"detail": "No ticker provided in request body."}).encode('utf-8'))
             return
             
         fmp = FMPClient()
