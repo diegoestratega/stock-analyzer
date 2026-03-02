@@ -3,7 +3,6 @@ import json
 import requests
 import yfinance as yf
 from http.server import BaseHTTPRequestHandler
-from urllib.parse import parse_qs, urlparse
 from dotenv import load_dotenv
 
 # --- 1. CONFIG & SETUP ---
@@ -157,7 +156,8 @@ class StockScorer:
 
         return round(total_score, 1), score_details
 
-# --- 4. VERCEL NATIVE HANDLER ---
+
+# --- 4. VERCEL NATIVE HANDLER CATCH-ALL ---
 class handler(BaseHTTPRequestHandler):
 
     def _set_headers(self):
@@ -174,7 +174,7 @@ class handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         self._set_headers()
-        self.wfile.write(json.dumps({"detail": "Analyze endpoint running. Send a POST request with {'ticker': 'AAPL'} to get data."}).encode('utf-8'))
+        self.wfile.write(json.dumps({"status": "Handler is running. Use POST to submit payload."}).encode('utf-8'))
 
     def do_POST(self):
         self._set_headers()
