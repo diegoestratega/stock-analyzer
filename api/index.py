@@ -168,26 +168,28 @@ class handler(BaseHTTPRequestHandler):
         self.send_header('Access-Control-Allow-Origin', '*')
         self.end_headers()
 
-        # Parse the URL exactly as Vercel sends it
-        parsed_url = urlparse(self.path)
-        query_params = parse_qs(parsed_url.query)
+        ticker = None
         
-        # Look for the ticker in the query parameter ?ticker=AAPL
-        ticker_list = query_params.get('ticker', [])
+        # Parse the raw URL path directly
+        raw_path = self.path
         
-        if not ticker_list:
-            # If no query parameter, check if it was sent as part of the path (e.g., /api/index/AAPL)
-            path_parts = [p for p in parsed_url.path.split('/') if p]
-            if path_parts and path_parts[-1].upper() != 'INDEX':
-                ticker = path_parts[-1].strip().upper()
-            else:
-                self.wfile.write(json.dumps({"detail": "No ticker provided in URL"}).encode('utf-8'))
-                return
-        else:
-            ticker = ticker_list[0].strip().upper()
+        # Method 1: Check for explicit query parameter (e.g. /api/index?ticker=AAPL)
+        if '?' in raw_path:
+            query_string = raw_path.split('?')[1]
+            query_params = parse_qs(query_string)
+            if 'ticker' in query_params:
+                ticker = query_params['ticker'][0].strip().upper()
 
+        # Method 2: Check if it was appended as a path folder (e.g. /api/index/AAPL)
         if not ticker:
-            self.wfile.write(json.dumps({"detail": "Invalid ticker"}).encode('utf-8'))
+            path_parts = [p for p in raw_path.split('?')[0].split('/') if p]
+            if path_parts and path_parts[-1].upper() not in ['API', 'INDEX', 'INDEX.PY']:
+                ticker = path_parts[-1].strip().upper()
+
+        # If we still don't have a ticker, fail gracefully.
+        if not ticker:
+            error_msg = {"detail": f"No ticker provided. Raw path received: {raw_path}"}
+            self.wfile.write(json.dumps(error_msg).encode('utf-8'))
             return
             
         fmp = FMPClient()
