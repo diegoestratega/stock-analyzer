@@ -7,7 +7,8 @@ async function analyzeTicker() {
     resultDiv.innerHTML = "Analyzing...";
 
     try {
-        const response = await fetch('/api/index.py', {
+        // Updated to the clean Vercel zero-config path
+        const response = await fetch('/api/index', {
             method: 'POST',
             headers: { 
                 'Content-Type': 'application/json' 
