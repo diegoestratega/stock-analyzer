@@ -7,15 +7,14 @@ async function analyzeTicker() {
     resultDiv.innerHTML = "Analyzing...";
 
     try {
-        // Build the absolute URL to prevent Vercel from issuing a 307/308 redirect that strips POST payloads
-        const targetUrl = window.location.origin + '/api/index';
+        // Now using a GET request with query parameters to bypass Vercel's POST body stripping
+        const targetUrl = `/api/index?ticker=${encodeURIComponent(tickerInput)}`;
         
         const response = await fetch(targetUrl, {
-            method: 'POST',
+            method: 'GET',
             headers: { 
                 'Content-Type': 'application/json' 
-            },
-            body: JSON.stringify({ ticker: tickerInput })
+            }
         });
 
         const data = await response.json();
