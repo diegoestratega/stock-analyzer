@@ -10,8 +10,8 @@ load_dotenv()
 FMP_API_KEY = os.getenv("FMP_API_KEY")
 BASE_URL = "https://financialmodelingprep.com/api/v3/"
 
-# Create the FastAPI app
-app = FastAPI(title="Stock Fundamentals Analyzer")
+# Using root_path ensures FastAPI knows it's running behind Vercel's /api/ route
+app = FastAPI(title="Stock Fundamentals Analyzer", root_path="/api")
 
 app.add_middleware(
     CORSMiddleware,
@@ -177,9 +177,8 @@ try:
 except Exception as e:
     fmp = None
 
-# We define the exact expected paths to ensure FastAPI parses {ticker} correctly
-@app.get("/api/analyze/{ticker}")
-@app.get("/analyze/{ticker}")
+# Using a standard query parameter prevents Vercel from mangling the path parameter
+@app.get("/analyze")
 async def analyze_stock(ticker: str):
     ticker = ticker.strip().upper()
     
