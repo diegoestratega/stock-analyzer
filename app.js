@@ -7,8 +7,10 @@ async function analyzeTicker() {
     resultDiv.innerHTML = "Analyzing...";
 
     try {
-        // EXACT PATH to prevent Vercel 308 Redirect which strips POST payloads
-        const response = await fetch('/api/index.py', {
+        // Build the absolute URL to prevent Vercel from issuing a 307/308 redirect that strips POST payloads
+        const targetUrl = window.location.origin + '/api/index';
+        
+        const response = await fetch(targetUrl, {
             method: 'POST',
             headers: { 
                 'Content-Type': 'application/json' 
