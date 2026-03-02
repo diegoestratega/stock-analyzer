@@ -2,7 +2,7 @@ import os
 import requests
 import yfinance as yf
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 # --- 1. CONFIG & SETUP ---
@@ -177,17 +177,14 @@ try:
 except Exception as e:
     fmp = None
 
-# Absolute Catch-All: This will accept literally any URL hit on this file.
-@app.get("/{full_path:path}")
-async def analyze_stock(request: Request, full_path: str):
-    # Extract the actual URL string the user tried to visit
-    url_string = str(request.url)
+# We define the exact expected paths to ensure FastAPI parses {ticker} correctly
+@app.get("/api/analyze/{ticker}")
+@app.get("/analyze/{ticker}")
+async def analyze_stock(ticker: str):
+    ticker = ticker.strip().upper()
     
-    # Grab the very last piece of the URL (e.g., AAPL)
-    ticker = url_string.strip('/').split('/')[-1].upper()
-    
-    if not ticker or ticker == "API" or ticker == "INDEX.PY":
-        raise HTTPException(status_code=400, detail=f"Invalid ticker parsed from: {url_string}")
+    if not ticker:
+        raise HTTPException(status_code=400, detail="No ticker provided")
         
     if not fmp:
         raise HTTPException(status_code=500, detail="API Client failed to initialize.")
