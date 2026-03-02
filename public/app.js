@@ -24,7 +24,10 @@ async function analyzeTicker() {
       return;
     }
 
-    resultDiv.innerHTML = `<pre>${JSON.stringify(data, null, 2)}</pre>`;
+    resultDiv.innerHTML = `
+      <h2>${data.ticker} — Score: ${data.score}/100</h2>
+      <pre>${JSON.stringify(data, null, 2)}</pre>
+    `;
   } catch (e) {
     resultDiv.textContent = 'Network error calling /api/analyze.';
   }

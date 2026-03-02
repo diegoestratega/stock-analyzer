@@ -182,12 +182,13 @@ _fmp = FMPClient(FMP_API_KEY)
 _scorer = StockScorer()
 
 
-@app.get("/")
+# MOVE health off "/" so root can serve static HTML
+@app.get("/api-health")
 def health():
-    return {"status": "Backend is running. POST /analyze with JSON {ticker: 'AAPL'}"}
+    return {"status": "Backend is running. POST /api/analyze with JSON {ticker: 'AAPL'}"}
 
 
-@app.post("/analyze")
+@app.post("/api/analyze")
 def analyze(req: AnalyzeRequest):
     ticker = (req.ticker or "").strip().upper()
     if not ticker:
