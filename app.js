@@ -5,6 +5,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const loadingDiv = document.getElementById('loading');
     const errorDiv = document.getElementById('error');
 
+    // Execute analysis when enter key is pressed
     tickerInput.addEventListener('keypress', function(e) {
         if (e.key === 'Enter') analyzeStock();
     });
@@ -18,12 +19,13 @@ document.addEventListener('DOMContentLoaded', () => {
             return;
         }
 
+        // Reset UI state
         resultsDiv.style.display = 'none';
         errorDiv.style.display = 'none';
         loadingDiv.style.display = 'block';
         
         try {
-            // Updated to securely hit the new /api/analyze endpoint
+            // Secure POST request explicitly to the analyze.py endpoint
             const response = await fetch(`/api/analyze`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -40,7 +42,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
         } catch (err) {
             console.error(err);
-            showError(`Error analyzing ${ticker}: ${err.message}`);
+            // Added check to give a cleaner message if Vercel still throws HTML instead of JSON
+            if (err.message.includes('Unexpected token')) {
+                showError(`Server routing error: Failed to connect to the Python backend.`);
+            } else {
+                showError(`Error analyzing ${ticker}: ${err.message}`);
+            }
         } finally {
             loadingDiv.style.display = 'none';
         }
@@ -74,8 +81,10 @@ document.addEventListener('DOMContentLoaded', () => {
             </div>
         `;
         document.getElementById('metricsContainer').innerHTML = metricsHtml;
+        
         renderTradingViewChart(ticker);
         renderScoreBreakdown(data.score, data.score_breakdown);
+        
         resultsDiv.style.display = 'block';
     }
 
@@ -109,8 +118,14 @@ document.addEventListener('DOMContentLoaded', () => {
         
         let mainColor = '#f44336'; 
         let recommendation = 'Strong Sell';
-        if (totalScore >= 70) { mainColor = '#4caf50'; recommendation = 'Strong Buy'; } 
-        else if (totalScore >= 20) { mainColor = '#ffeb3b'; recommendation = 'Hold / Neutral'; }
+        
+        if (totalScore >= 70) { 
+            mainColor = '#4caf50'; 
+            recommendation = 'Strong Buy'; 
+        } else if (totalScore >= 20) { 
+            mainColor = '#ffeb3b'; 
+            recommendation = 'Hold / Neutral'; 
+        }
 
         let breakdownHtml = `
             <div class="score-header" style="color: ${mainColor}">
@@ -125,6 +140,7 @@ document.addEventListener('DOMContentLoaded', () => {
         sortedBreakdown.forEach(([key, value]) => {
             let ballColor = '#f44336';
             const percentage = (value.awarded / value.weight) * 100;
+            
             if (percentage >= 70) ballColor = '#4caf50';
             else if (percentage >= 20) ballColor = '#ffeb3b';
 
