@@ -25,8 +25,8 @@ document.addEventListener('DOMContentLoaded', () => {
         loadingDiv.style.display = 'block';
         
         try {
-            // Secure POST request explicitly to the analyze.py endpoint
-            const response = await fetch(`/api/analyze`, {
+            // Send secure POST request directly to the FastAPI index route
+            const response = await fetch(`/api/index`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ ticker: ticker })
@@ -42,7 +42,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
         } catch (err) {
             console.error(err);
-            // Added check to give a cleaner message if Vercel still throws HTML instead of JSON
             if (err.message.includes('Unexpected token')) {
                 showError(`Server routing error: Failed to connect to the Python backend.`);
             } else {
