@@ -2,31 +2,38 @@ import os
 import json
 import requests
 import yfinance as yf
-from http.server import BaseHTTPRequestHandler
 from dotenv import load_dotenv
 
-# --- 1. CONFIG & SETUP ---
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+
 load_dotenv()
-FMP_API_KEY = os.getenv("FMP_API_KEY")
+
+FMP_API_KEY = os.getenv("FMP_API_KEY", "").strip()
 BASE_URL = "https://financialmodelingprep.com/api/v3/"
 
-# --- 2. FMP CLIENT LOGIC ---
-class FMPClient:
-    def __init__(self):
-        self.api_key = FMP_API_KEY
 
-    def fetch_fmp_json(self, endpoint, params=None):
+class AnalyzeRequest(BaseModel):
+    ticker: str
+
+
+class FMPClient:
+    def __init__(self, api_key: str):
+        self.api_key = api_key
+
+    def fetch_fmp_json(self, endpoint: str, params=None):
         if not self.api_key:
             return []
         if params is None:
             params = {}
-        params['apikey'] = self.api_key
-        headers = {'User-Agent': 'Mozilla/5.0'}
+        params["apikey"] = self.api_key
+        headers = {"User-Agent": "Mozilla/5.0"}
         try:
-            response = requests.get(f"{BASE_URL}{endpoint}", params=params, headers=headers)
-            if response.status_code != 200:
+            r = requests.get(f"{BASE_URL}{endpoint}", params=params, headers=headers, timeout=20)
+            if r.status_code != 200:
                 return []
-            data = response.json()
+            data = r.json()
             return data if isinstance(data, list) else [data]
         except Exception:
             return []
@@ -34,48 +41,46 @@ class FMPClient:
     def get_fundamentals(self, ticker: str):
         ticker = ticker.upper()
         stock = yf.Ticker(ticker)
-        info = stock.info if stock.info else {}
+        info = stock.info or {}
 
-        market_cap = info.get('marketCap', 0)
-        price = info.get('currentPrice', info.get('regularMarketPrice', 0))
-        pe_trailing = info.get('trailingPE', 0)
-        pe_forward = info.get('forwardPE', 0)
-        pb_ratio = info.get('priceToBook', 0)
-        high_52w = info.get('fiftyTwoWeekHigh', 0)
-        low_52w = info.get('fiftyTwoWeekLow', 0)
-        div_rate = info.get('dividendRate', info.get('trailingAnnualDividendRate', 0))
-        
-        dividend_yield = (div_rate / price) * 100 if price and price > 0 and div_rate else 0
+        market_cap = info.get("marketCap", 0) or 0
+        price = info.get("currentPrice", info.get("regularMarketPrice", 0)) or 0
+        pe_trailing = info.get("trailingPE", 0) or 0
+        pe_forward = info.get("forwardPE", 0) or 0
+        pb_ratio = info.get("priceToBook", 0) or 0
+        high_52w = info.get("fiftyTwoWeekHigh", 0) or 0
+        low_52w = info.get("fiftyTwoWeekLow", 0) or 0
+        div_rate = info.get("dividendRate", info.get("trailingAnnualDividendRate", 0)) or 0
 
-        # Debt to Equity
+        dividend_yield = (div_rate / price) * 100 if price and div_rate else 0
+
         debt_to_equity = 0
         ttm_metrics = self.fetch_fmp_json(f"key-metrics-ttm/{ticker}")
-        if ttm_metrics and len(ttm_metrics) > 0:
-            debt_to_equity = ttm_metrics[0].get('debtToEquityRatioTTM', 0)
-            
-        if not debt_to_equity or debt_to_equity == 0:
+        if ttm_metrics:
+            debt_to_equity = ttm_metrics[0].get("debtToEquityRatioTTM", 0) or 0
+
+        if not debt_to_equity:
             try:
                 bs = stock.balance_sheet
                 if bs is not None and not bs.empty:
-                    total_debt = bs.loc['Total Debt'].iloc[0] if 'Total Debt' in bs.index else 0
-                    total_equity = bs.loc['Stockholders Equity'].iloc[0] if 'Stockholders Equity' in bs.index else 0
-                    if total_equity > 0:
-                        debt_to_equity = total_debt / total_equity
+                    total_debt = bs.loc["Total Debt"].iloc[0] if "Total Debt" in bs.index else 0
+                    total_equity = bs.loc["Stockholders Equity"].iloc[0] if "Stockholders Equity" in bs.index else 0
+                    if total_equity and total_equity > 0:
+                        debt_to_equity = float(total_debt) / float(total_equity)
             except Exception:
                 pass
 
-        # Growth
         rev_growth_qyoy = 0
         eps_growth_qyoy = 0
         try:
             qis = stock.quarterly_income_stmt
             if qis is not None and not qis.empty:
-                if 'Total Revenue' in qis.index:
-                    revs = qis.loc['Total Revenue'].dropna().values
+                if "Total Revenue" in qis.index:
+                    revs = qis.loc["Total Revenue"].dropna().values
                     if len(revs) >= 5 and revs[4] != 0:
                         rev_growth_qyoy = ((revs[0] - revs[4]) / revs[4]) * 100
 
-                eps_key = 'Diluted EPS' if 'Diluted EPS' in qis.index else 'Basic EPS' if 'Basic EPS' in qis.index else None
+                eps_key = "Diluted EPS" if "Diluted EPS" in qis.index else ("Basic EPS" if "Basic EPS" in qis.index else None)
                 if eps_key:
                     eps_vals = qis.loc[eps_key].dropna().values
                     if len(eps_vals) >= 5 and eps_vals[4] != 0:
@@ -89,138 +94,123 @@ class FMPClient:
             "price": price,
             "high_52w": high_52w,
             "low_52w": low_52w,
-            "pe_trailing": round(pe_trailing, 2) if pe_trailing else 0,
-            "pe_forward": round(pe_forward, 2) if pe_forward else 0,
-            "dividend_yield": round(dividend_yield, 2) if dividend_yield else 0,
-            "price_to_book": round(pb_ratio, 2) if pb_ratio else 0,
-            "debt_to_equity": round(debt_to_equity, 2) if debt_to_equity else 0,
-            "revenue_growth_quarterly_yoy": round(rev_growth_qyoy, 2),
-            "eps_growth_quarterly_yoy": round(eps_growth_qyoy, 2)
+            "pe_trailing": round(float(pe_trailing), 2) if pe_trailing else 0,
+            "pe_forward": round(float(pe_forward), 2) if pe_forward else 0,
+            "dividend_yield": round(float(dividend_yield), 2) if dividend_yield else 0,
+            "price_to_book": round(float(pb_ratio), 2) if pb_ratio else 0,
+            "debt_to_equity": round(float(debt_to_equity), 2) if debt_to_equity else 0,
+            "revenue_growth_quarterly_yoy": round(float(rev_growth_qyoy), 2),
+            "eps_growth_quarterly_yoy": round(float(eps_growth_qyoy), 2),
         }
 
-# --- 3. SCORING LOGIC ---
+
 class StockScorer:
     def scale(self, val, min_val, max_val, lower_is_better=False):
-        if val is None: return 0
+        if val is None:
+            return 0
+        val = float(val)
         if lower_is_better:
-            if val <= min_val: return 100
-            if val >= max_val: return 0
-            return (100 - (((val - min_val) / (max_val - min_val)) * 100))
+            if val <= min_val:
+                return 100
+            if val >= max_val:
+                return 0
+            return 100 - (((val - min_val) / (max_val - min_val)) * 100)
         else:
-            if val >= max_val: return 100
-            if val <= min_val: return 0
+            if val >= max_val:
+                return 100
+            if val <= min_val:
+                return 0
             return (((val - min_val) / (max_val - min_val)) * 100)
 
     def evaluate(self, fundamentals: dict):
         score_details = {}
-        total_score = 0
+        total_score = 0.0
 
-        price = fundamentals.get('price', 0)
-        low_52w = fundamentals.get('low_52w', 0)
-        market_cap = fundamentals.get('market_cap', 0)
-        pe_trailing = fundamentals.get('pe_trailing', 0)
-        pe_forward = fundamentals.get('pe_forward', 0)
-        debt_to_equity = fundamentals.get('debt_to_equity', 0)
-        rev_growth = fundamentals.get('revenue_growth_quarterly_yoy', 0)
-        eps_growth = fundamentals.get('eps_growth_quarterly_yoy', 0)
+        price = fundamentals.get("price", 0) or 0
+        low_52w = fundamentals.get("low_52w", 0) or 0
+        market_cap = fundamentals.get("market_cap", 0) or 0
+        pe_trailing = fundamentals.get("pe_trailing", 0) or 0
+        pe_forward = fundamentals.get("pe_forward", 0) or 0
+        debt_to_equity = fundamentals.get("debt_to_equity", 0) or 0
+        rev_growth = fundamentals.get("revenue_growth_quarterly_yoy", 0) or 0
+        eps_growth = fundamentals.get("eps_growth_quarterly_yoy", 0) or 0
 
-        pct_from_low = ((price - low_52w) / low_52w * 100) if low_52w and low_52w > 0 else 100
-        score_price = self.scale(pct_from_low, 5, 20, lower_is_better=True)
-        total_score += (score_price * 0.25)
-        score_details['price_vs_low'] = {"awarded": score_price * 0.25, "weight": 25}
+        pct_from_low = ((price - low_52w) / low_52w * 100) if low_52w else 100
+        s = self.scale(pct_from_low, 5, 20, lower_is_better=True)
+        total_score += s * 0.25
+        score_details["price_vs_low"] = {"awarded": round(s * 0.25, 2), "weight": 25}
 
-        mc_billions = market_cap / 1000000000 if market_cap else 0
-        score_mc = self.scale(mc_billions, 5, 15, lower_is_better=False)
-        total_score += (score_mc * 0.20)
-        score_details['market_cap'] = {"awarded": score_mc * 0.20, "weight": 20}
+        mc_billions = (market_cap / 1_000_000_000) if market_cap else 0
+        s = self.scale(mc_billions, 5, 15, lower_is_better=False)
+        total_score += s * 0.20
+        score_details["market_cap"] = {"awarded": round(s * 0.20, 2), "weight": 20}
 
-        score_pe = self.scale(pe_trailing, 15, 25, lower_is_better=True) if pe_trailing else 0
-        total_score += (score_pe * 0.20)
-        score_details['pe_trailing'] = {"awarded": score_pe * 0.20, "weight": 20}
+        s = self.scale(pe_trailing, 15, 25, lower_is_better=True) if pe_trailing else 0
+        total_score += s * 0.20
+        score_details["pe_trailing"] = {"awarded": round(s * 0.20, 2), "weight": 20}
 
-        score_de = self.scale(debt_to_equity, 0.5, 1.0, lower_is_better=True)
-        total_score += (score_de * 0.20)
-        score_details['debt_equity'] = {"awarded": score_de * 0.20, "weight": 20}
+        s = self.scale(debt_to_equity, 0.5, 1.0, lower_is_better=True)
+        total_score += s * 0.20
+        score_details["debt_equity"] = {"awarded": round(s * 0.20, 2), "weight": 20}
 
-        score_fpe = self.scale(pe_forward, 15, 25, lower_is_better=True) if pe_forward else 0
-        total_score += (score_fpe * 0.05)
-        score_details['forward_pe'] = {"awarded": score_fpe * 0.05, "weight": 5}
+        s = self.scale(pe_forward, 15, 25, lower_is_better=True) if pe_forward else 0
+        total_score += s * 0.05
+        score_details["forward_pe"] = {"awarded": round(s * 0.05, 2), "weight": 5}
 
-        score_revg = 100 if rev_growth and rev_growth > 0 else 0
-        total_score += (score_revg * 0.05)
-        score_details['revenue_growth'] = {"awarded": score_revg * 0.05, "weight": 5}
+        s = 100 if rev_growth > 0 else 0
+        total_score += s * 0.05
+        score_details["revenue_growth"] = {"awarded": round(s * 0.05, 2), "weight": 5}
 
-        score_epsg = 100 if eps_growth and eps_growth > 0 else 0
-        total_score += (score_epsg * 0.05)
-        score_details['eps_growth'] = {"awarded": score_epsg * 0.05, "weight": 5}
+        s = 100 if eps_growth > 0 else 0
+        total_score += s * 0.05
+        score_details["eps_growth"] = {"awarded": round(s * 0.05, 2), "weight": 5}
 
         return round(total_score, 1), score_details
 
 
-# --- 4. VERCEL NATIVE HANDLER CATCH-ALL ---
-class handler(BaseHTTPRequestHandler):
+app = FastAPI()
 
-    def _set_headers(self):
-        self.send_response(200)
-        self.send_header('Content-type', 'application/json')
-        self.send_header('Access-Control-Allow-Origin', '*')
-        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
-        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
-        self.end_headers()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-    def do_OPTIONS(self):
-        self._set_headers()
-        return
+_fmp = FMPClient(FMP_API_KEY)
+_scorer = StockScorer()
 
-    def do_GET(self):
-        self._set_headers()
-        self.wfile.write(json.dumps({"status": "Handler is running. Use POST to submit payload."}).encode('utf-8'))
 
-    def do_POST(self):
-        self._set_headers()
-        ticker = None
-        
-        try:
-            content_length = int(self.headers.get('Content-Length', 0))
-            if content_length > 0:
-                post_data = self.rfile.read(content_length).decode('utf-8')
-                body = json.loads(post_data)
-                ticker = body.get('ticker', '').strip().upper()
-        except Exception as e:
-            self.wfile.write(json.dumps({"detail": f"Error parsing body: {str(e)}"}).encode('utf-8'))
-            return
+@app.get("/")
+def health():
+    return {"status": "Backend is running. POST /analyze with JSON {ticker: 'AAPL'}"}
 
-        if not ticker:
-            self.wfile.write(json.dumps({"detail": "No ticker provided in request body."}).encode('utf-8'))
-            return
-            
-        fmp = FMPClient()
-        scorer = StockScorer()
 
-        if not fmp.api_key:
-            self.wfile.write(json.dumps({"detail": "API Client failed to initialize. Check Vercel Env Vars."}).encode('utf-8'))
-            return
+@app.post("/analyze")
+def analyze(req: AnalyzeRequest):
+    ticker = (req.ticker or "").strip().upper()
+    if not ticker:
+        raise HTTPException(status_code=400, detail="Missing ticker")
 
-        # Fetch and score
-        fundamentals = fmp.get_fundamentals(ticker)
-        if not fundamentals or fundamentals.get('price', 0) == 0:
-            self.wfile.write(json.dumps({"detail": f"Could not find fundamental data for {ticker}"}).encode('utf-8'))
-            return
+    if not _fmp.api_key:
+        raise HTTPException(status_code=500, detail="Missing FMP_API_KEY in Vercel Environment Variables")
 
-        total_score, score_breakdown = scorer.evaluate(fundamentals)
+    fundamentals = _fmp.get_fundamentals(ticker)
+    if not fundamentals or fundamentals.get("price", 0) == 0:
+        raise HTTPException(status_code=404, detail=f"Could not find fundamental data for {ticker}")
 
-        # Return JSON
-        response_data = {
-            "ticker": ticker,
-            "score": total_score,
-            "score_breakdown": score_breakdown,
-            "metrics": {
-                "forward_pe": fundamentals.get("pe_forward"),
-                "dividend_yield": fundamentals.get("dividend_yield") / 100 if fundamentals.get("dividend_yield") else None,
-                "revenue_growth": fundamentals.get("revenue_growth_quarterly_yoy") / 100 if fundamentals.get("revenue_growth_quarterly_yoy") else None,
-                "price_to_book": fundamentals.get("price_to_book"),
-                "debt_to_equity": fundamentals.get("debt_to_equity")
-            }
-        }
-        
-        self.wfile.write(json.dumps(response_data).encode('utf-8'))
+    score, breakdown = _scorer.evaluate(fundamentals)
+
+    return {
+        "ticker": ticker,
+        "score": score,
+        "score_breakdown": breakdown,
+        "metrics": {
+            "forward_pe": fundamentals.get("pe_forward"),
+            "dividend_yield": (fundamentals.get("dividend_yield") / 100) if fundamentals.get("dividend_yield") else None,
+            "revenue_growth": (fundamentals.get("revenue_growth_quarterly_yoy") / 100) if fundamentals.get("revenue_growth_quarterly_yoy") else None,
+            "price_to_book": fundamentals.get("price_to_book"),
+            "debt_to_equity": fundamentals.get("debt_to_equity"),
+        },
+    }
