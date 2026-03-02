@@ -1,18 +1,389 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Stock Analyzer</title>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Stock Fundamentals Analyzer</title>
+  
+  <!-- Lightweight Charts CDN -->
+  <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+  
+  <style>
+    :root {
+      --bg: #0f172a;
+      --surface: #1e293b;
+      --text: #f8fafc;
+      --text-muted: #94a3b8;
+      --border: #334155;
+      --primary: #3b82f6;
+      --success: #22c55e;
+      --danger: #ef4444;
+      --warning: #f59e0b;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+      background-color: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+    }
+
+    .container {
+      max-width: 1400px;
+      margin: 0 auto;
+      padding: 20px;
+    }
+
+    .app-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 30px;
+      padding-bottom: 15px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .app-header h1 {
+      font-size: 26px;
+      margin: 0;
+      color: white;
+      letter-spacing: 1px;
+    }
+
+    .search-bar {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+    }
+
+    .search-bar input {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      color: white;
+      padding: 10px 15px;
+      border-radius: 6px;
+      font-size: 16px;
+      outline: none;
+      width: 150px;
+      text-transform: uppercase;
+    }
+
+    .search-bar button {
+      background: var(--primary);
+      color: white;
+      border: none;
+      padding: 10px 25px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 16px;
+      font-weight: 600;
+    }
+
+    .search-bar button:hover {
+      background: #2563eb;
+    }
+
+    .search-bar button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .error {
+      background: rgba(239, 68, 68, 0.1);
+      color: var(--danger);
+      padding: 15px;
+      border-radius: 6px;
+      margin-bottom: 20px;
+      border: 1px solid var(--danger);
+      text-align: center;
+    }
+
+    .hidden {
+      display: none !important;
+    }
+
+    .dashboard {
+      display: grid;
+      grid-template-columns: 350px minmax(0, 1fr) 300px;
+      gap: 25px;
+      align-items: start;
+    }
+
+    .panel {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 20px;
+    }
+
+    .symbol-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      margin-bottom: 20px;
+      border-bottom: 1px solid var(--border);
+      padding-bottom: 15px;
+    }
+
+    .symbol-header h1 {
+      margin: 0;
+      font-size: 28px;
+    }
+
+    .symbol-header h2 {
+      margin: 0;
+      font-size: 24px;
+      color: var(--success);
+    }
+
+    .ext-link {
+      color: var(--primary);
+      text-decoration: none;
+      font-size: 14px;
+    }
+
+    h3 {
+      margin-top: 0;
+      font-size: 14px;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin-bottom: 12px;
+    }
+
+    .metrics-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 15px;
+      margin-bottom: 20px;
+    }
+
+    .metric {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .metric .label {
+      color: var(--text-muted);
+      font-size: 12px;
+    }
+
+    .metric .value {
+      font-size: 16px;
+      font-weight: 600;
+    }
+
+    .table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 5px;
+      font-size: 13px;
+    }
+
+    .table th,
+    .table td {
+      text-align: left;
+      padding: 6px 0;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .table th {
+      color: var(--text-muted);
+      font-weight: normal;
+    }
+
+    .breakdown-list {
+      list-style: none;
+      padding: 0;
+      margin: 0;
+      font-size: 14px;
+    }
+
+    .breakdown-list li {
+      padding: 12px 0;
+      border-bottom: 1px dashed var(--border);
+      display: flex;
+      justify-content: space-between;
+      color: #cbd5e1;
+    }
+
+    .chart-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 15px;
+    }
+
+    .chart-legend {
+      display: flex;
+      font-size: 13px;
+      flex: 1;
+    }
+
+    .legend-item span {
+      font-weight: bold;
+    }
+
+    .legend-high {
+      color: var(--success);
+    }
+
+    .legend-low {
+      color: var(--danger);
+    }
+
+    .in-chart-score {
+      text-align: center;
+      flex: 2;
+      font-size: 26px;
+      font-weight: bold;
+    }
+
+    .header-spacer {
+      flex: 1;
+    }
+
+    .chart-container {
+      width: 100%;
+      height: 550px;
+      position: relative;
+    }
+
+    #tv-chart {
+      width: 100%;
+      height: 100%;
+      background: #0f172a;
+      border-radius: 6px;
+      overflow: hidden;
+      border: 1px solid var(--border);
+    }
+
+    @media (max-width: 1200px) {
+      .dashboard {
+        grid-template-columns: 1fr;
+        gap: 20px;
+      }
+    }
+  </style>
 </head>
+
 <body>
-  <h1>Stock Analyzer</h1>
+  <div class="container">
+    <div class="app-header">
+      <h1>Stock Fundamentals Analyzer</h1>
+      <div class="search-bar">
+        <input type="text" id="ticker-input" placeholder="TICKER e.g. AAPL" autocomplete="off">
+        <button id="analyze-btn">Analyze</button>
+      </div>
+    </div>
 
-  <input id="ticker" placeholder="AAPL" />
-  <button id="analyzeBtn">Analyze</button>
+    <div id="error-message" class="error hidden"></div>
 
-  <div id="result"></div>
+    <div id="dashboard" class="dashboard hidden">
+      <!-- LEFT COLUMN: Fundamentals -->
+      <div class="left-col panel">
+        <div class="symbol-header">
+          <div>
+            <h1 id="stock-symbol">--</h1>
+            <a id="stockanalysis-link" class="ext-link" href="#" target="_blank">View on StockAnalysis</a>
+          </div>
+          <h2 id="stock-price">--</h2>
+        </div>
 
-  <script src="/app.js"></script>
+        <h3>Key Metrics</h3>
+        <div class="metrics-grid">
+          <div class="metric">
+            <span class="label">Market Cap</span>
+            <span class="value" id="val-mcap">--</span>
+          </div>
+          <div class="metric">
+            <span class="label">Div Yield</span>
+            <span class="value" id="val-div">--</span>
+          </div>
+          <div class="metric">
+            <span class="label">PE Trail</span>
+            <span class="value" id="val-pe-trail">--</span>
+          </div>
+          <div class="metric">
+            <span class="label">PE Fwd</span>
+            <span class="value" id="val-pe-fwd">--</span>
+          </div>
+          <div class="metric">
+            <span class="label">Debt/Equity</span>
+            <span class="value" id="val-de">--</span>
+          </div>
+          <div class="metric">
+            <span class="label">Price/Book</span>
+            <span class="value" id="val-pb">--</span>
+          </div>
+        </div>
+
+        <h3 style="margin-top: 25px">Growth YoY</h3>
+        <div class="metrics-grid">
+          <div class="metric">
+            <span class="label">Rev Growth TTM</span>
+            <span class="value" id="val-revg-ann">--</span>
+          </div>
+          <div class="metric">
+            <span class="label">Rev Growth Qtr</span>
+            <span class="value" id="val-revg-qtr">--</span>
+          </div>
+          <div class="metric">
+            <span class="label">EPS Growth TTM</span>
+            <span class="value" id="val-epsg-ann">--</span>
+          </div>
+          <div class="metric">
+            <span class="label">EPS Growth Qtr</span>
+            <span class="value" id="val-epsg-qtr">--</span>
+          </div>
+        </div>
+
+        <h3 style="margin-top: 25px">EPS Hist (Last 5 Qtrs)</h3>
+        <table class="table" id="eps-table">
+          <thead>
+            <tr>
+              <th>Quarter</th>
+              <th>EPS</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <!-- MIDDLE COLUMN: Chart -->
+      <div class="mid-col panel">
+        <div class="chart-header">
+          <div class="header-spacer"></div>
+          <div class="in-chart-score">
+            <span id="score-number">--</span>
+            <span id="score-rating"></span>
+          </div>
+          <div class="chart-legend" style="flex-direction: column; align-items: flex-end; gap: 4px">
+            <div class="legend-item">1Y High <span class="legend-high" id="val-1y-high">--</span></div>
+            <div class="legend-item">1Y Low <span class="legend-low" id="val-1y-low">--</span></div>
+          </div>
+        </div>
+        <div class="chart-container">
+          <div id="tv-chart"></div>
+        </div>
+      </div>
+
+      <!-- RIGHT COLUMN: Score Breakdown -->
+      <div class="right-col panel">
+        <h3>Score Breakdown</h3>
+        <ul id="score-breakdown-list" class="breakdown-list"></ul>
+      </div>
+    </div>
+  </div>
+
+  <!-- External app.js (no localhost URLs) -->
+  <script src="/app.js" defer></script>
 </body>
 </html>
