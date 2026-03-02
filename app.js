@@ -27,8 +27,8 @@ document.addEventListener('DOMContentLoaded', () => {
         loadingDiv.style.display = 'block';
         
         try {
-            // Using the exact path setup from Vercel routes
-            const response = await fetch(`/api/analyze/${ticker}`);
+            // UPDATED: Using query parameter ?ticker=... for Vercel native handler
+            const response = await fetch(`/api/analyze?ticker=${ticker}`);
             
             if (!response.ok) {
                 const errorData = await response.json();
@@ -162,4 +162,23 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function formatLabel(key) {
-        const labels
+        const labels = {
+            'price_vs_low': 'Price vs 1Y Low',
+            'market_cap': 'Market Cap',
+            'pe_trailing': 'Trailing P/E',
+            'forward_pe': 'Forward P/E',
+            'dividend_yield': 'Dividend Yield',
+            'revenue_growth': 'Revenue Growth',
+            'eps_growth': 'EPS Consistency',
+            'debt_equity': 'Debt / Equity Ratio'
+        };
+        return labels[key] || key.replace(/_/g, ' ');
+    }
+
+    function showError(message) {
+        errorDiv.textContent = message;
+        errorDiv.style.display = 'block';
+        loadingDiv.style.display = 'none';
+        resultsDiv.style.display = 'none';
+    }
+});
