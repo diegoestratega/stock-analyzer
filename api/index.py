@@ -3,6 +3,7 @@ import json
 import requests
 import yfinance as yf
 from http.server import BaseHTTPRequestHandler
+from urllib.parse import parse_qs, urlparse
 from dotenv import load_dotenv
 
 # --- 1. CONFIG & SETUP ---
@@ -160,17 +161,43 @@ class StockScorer:
 
 # --- 4. VERCEL NATIVE HANDLER ---
 class handler(BaseHTTPRequestHandler):
-    def do_POST(self):
-        # Setup response headers immediately
+
+    def _set_headers(self):
         self.send_response(200)
         self.send_header('Content-type', 'application/json')
+        # Allow Cross-Origin requests
         self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
         self.end_headers()
 
+    # Handle Preflight OPTIONS requests for CORS
+    def do_OPTIONS(self):
+        self._set_headers()
+        return
+
+    # Handle standard GET requests just in case (fallback)
+    def do_GET(self):
+        self._set_headers()
+        
+        parsed_url = urlparse(self.path)
+        query_params = parse_qs(parsed_url.query)
+        
+        ticker_list = query_params.get('ticker', [])
+        ticker = ticker_list[0].strip().upper() if ticker_list else None
+        
+        if not ticker:
+            self.wfile.write(json.dumps({"detail": "This endpoint requires a POST request with a JSON body containing a 'ticker' field."}).encode('utf-8'))
+            return
+            
+        self._process_ticker(ticker)
+
+    # Main POST logic to reliably capture the payload body
+    def do_POST(self):
+        self._set_headers()
         ticker = None
         
         try:
-            # Read the payload from the POST request body
             content_length = int(self.headers.get('Content-Length', 0))
             if content_length > 0:
                 post_data = self.rfile.read(content_length).decode('utf-8')
@@ -184,6 +211,10 @@ class handler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps({"detail": "No ticker provided in request body."}).encode('utf-8'))
             return
             
+        self._process_ticker(ticker)
+
+    # Core execution function (called by both GET and POST)
+    def _process_ticker(self, ticker):
         fmp = FMPClient()
         scorer = StockScorer()
 
@@ -214,4 +245,3 @@ class handler(BaseHTTPRequestHandler):
         }
         
         self.wfile.write(json.dumps(response_data).encode('utf-8'))
-        return
