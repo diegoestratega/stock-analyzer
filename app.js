@@ -1,14 +1,13 @@
 async function analyzeTicker() {
-    // Get the ticker from your input field (adjust the ID if yours is named differently)
     const tickerInput = document.getElementById('ticker').value.trim().toUpperCase();
-    const resultDiv = document.getElementById('result'); // Adjust ID to match your results container
+    const resultDiv = document.getElementById('result');
     
     if (!tickerInput) return;
     
     resultDiv.innerHTML = "Analyzing...";
 
     try {
-        const response = await fetch('/api/analyze.py', {
+        const response = await fetch('/api/index.py', {
             method: 'POST',
             headers: { 
                 'Content-Type': 'application/json' 
@@ -18,13 +17,11 @@ async function analyzeTicker() {
 
         const data = await response.json();
 
-        // Handle Vercel or Python errors returning the "detail" key
         if (data.detail) {
             resultDiv.innerHTML = `<p style="color: red;">Error: ${data.detail}</p>`;
             return;
         }
 
-        // Render successful response
         resultDiv.innerHTML = `
             <h2>${data.ticker} - Total Score: ${data.score}/100</h2>
             <div style="display: flex; gap: 20px; margin-bottom: 20px;">
@@ -50,7 +47,6 @@ ${JSON.stringify(data.score_breakdown, null, 2)}
     }
 }
 
-// Attach the event listener to your button (adjust the ID to match your HTML button)
 document.getElementById('analyzeBtn').addEventListener('click', (e) => {
     e.preventDefault();
     analyzeTicker();
