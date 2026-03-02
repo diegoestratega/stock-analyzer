@@ -1,233 +1,182 @@
-document.addEventListener("DOMContentLoaded", () => {
-    const input = document.getElementById("ticker-input");
-    const btn = document.getElementById("analyze-btn");
-    const dashboard = document.getElementById("dashboard");
-    const errorMsg = document.getElementById("error-message");
-    
-    let tvChart = null; 
-    let resizeObserver = null; 
+document.addEventListener('DOMContentLoaded', () => {
+    const analyzeBtn = document.getElementById('analyzeBtn');
+    const tickerInput = document.getElementById('tickerInput');
+    const resultsDiv = document.getElementById('results');
+    const loadingDiv = document.getElementById('loading');
+    const errorDiv = document.getElementById('error');
 
-    btn.addEventListener("click", () => {
-        const ticker = input.value.trim().toUpperCase();
-        if (ticker) fetchAnalysis(ticker);
-    });
-
-    input.addEventListener("keypress", (e) => {
-        if (e.key === "Enter") {
-            const ticker = input.value.trim().toUpperCase();
-            if (ticker) fetchAnalysis(ticker);
+    // Execute analysis when enter key is pressed
+    tickerInput.addEventListener('keypress', function(e) {
+        if (e.key === 'Enter') {
+            analyzeStock();
         }
     });
 
-    async function fetchAnalysis(ticker) {
-        errorMsg.classList.add("hidden");
-        dashboard.classList.add("hidden");
-        btn.textContent = "Analyzing...";
-        btn.disabled = true;
+    analyzeBtn.addEventListener('click', analyzeStock);
 
-        try {
-            let response;
-            try {
-                response = await fetch(`http://127.0.0.1:8000/api/analyze/${ticker}`);
-            } catch (networkError) {
-                throw new Error("Backend server is not running! Ensure python backend/main.py is running in your terminal.");
-            }
-
-            const data = await response.json();
-
-            if (!response.ok) {
-                throw new Error(data.detail || "Failed to fetch data from API");
-            }
-
-            populateDashboard(data);
-            dashboard.classList.remove("hidden");
-            
-            setTimeout(() => {
-                drawChart(data.chart);
-            }, 50);
-            
-        } catch (error) {
-            errorMsg.textContent = error.message;
-            errorMsg.classList.remove("hidden");
-        } finally {
-            btn.textContent = "Analyze";
-            btn.disabled = false;
-        }
-    }
-
-    function populateDashboard(data) {
-        const funds = data.fundamentals;
-        const score = data.score;
-
-        document.getElementById("stock-symbol").textContent = funds.symbol;
-        document.getElementById("stock-price").textContent = `$${funds.price.toFixed(2)}`;
-        
-        document.getElementById("stockanalysis-link").href = `https://stockanalysis.com/stocks/${funds.symbol.toLowerCase()}/financials/?p=quarterly`;
-
-        const formatMoney = (num) => {
-            if (num >= 1e12) return `$${(num / 1e12).toFixed(2)}T`;
-            if (num >= 1e9) return `$${(num / 1e9).toFixed(2)}B`;
-            if (num >= 1e6) return `$${(num / 1e6).toFixed(2)}M`;
-            return `$${num.toLocaleString()}`;
-        };
-        const formatPct = (num) => `${num.toFixed(2)}%`;
-
-        // Populate Key Metrics
-        document.getElementById("val-mcap").textContent = formatMoney(funds.market_cap);
-        document.getElementById("val-pe-trail").textContent = funds.pe_trailing > 0 ? funds.pe_trailing.toFixed(2) : "N/A";
-        document.getElementById("val-pe-fwd").textContent = funds.pe_forward > 0 ? funds.pe_forward.toFixed(2) : "N/A";
-        document.getElementById("val-pb").textContent = funds.price_to_book > 0 ? funds.price_to_book.toFixed(2) : "N/A";
-        document.getElementById("val-de").textContent = funds.debt_to_equity.toFixed(2);
-        document.getElementById("val-div").textContent = funds.dividend_yield > 0 ? formatPct(funds.dividend_yield) : "None";
-        
-        // Populate 1Y High and Low safely (if HTML elements exist)
-        const el1yHigh = document.getElementById("val-1y-high");
-        if (el1yHigh) el1yHigh.textContent = funds.high_52w > 0 ? `$${funds.high_52w.toFixed(2)}` : "N/A";
-        
-        const el1yLow = document.getElementById("val-1y-low");
-        if (el1yLow) el1yLow.textContent = funds.low_52w > 0 ? `$${funds.low_52w.toFixed(2)}` : "N/A";
-
-        // Growth metrics
-        const revgAnn = document.getElementById("val-revg-ann");
-        revgAnn.textContent = formatPct(funds.revenue_growth_annual_yoy);
-        revgAnn.style.color = funds.revenue_growth_annual_yoy >= 0 ? "var(--success)" : "var(--danger)";
-
-        const revgQtr = document.getElementById("val-revg-qtr");
-        revgQtr.textContent = formatPct(funds.revenue_growth_quarterly_yoy);
-        revgQtr.style.color = funds.revenue_growth_quarterly_yoy >= 0 ? "var(--success)" : "var(--danger)";
-
-        const epsgAnn = document.getElementById("val-epsg-ann");
-        epsgAnn.textContent = formatPct(funds.eps_growth_annual_yoy);
-        epsgAnn.style.color = funds.eps_growth_annual_yoy >= 0 ? "var(--success)" : "var(--danger)";
-
-        const epsgQtr = document.getElementById("val-epsg-qtr");
-        epsgQtr.textContent = formatPct(funds.eps_growth_quarterly_yoy);
-        epsgQtr.style.color = funds.eps_growth_quarterly_yoy >= 0 ? "var(--success)" : "var(--danger)";
-
-        const tbody = document.querySelector("#eps-table tbody");
-        tbody.innerHTML = "";
-        funds.eps_history_5q.forEach(q => {
-            const tr = document.createElement("tr");
-            tr.innerHTML = `<td>${q.date}</td><td>$${q.eps.toFixed(2)}</td>`;
-            tbody.appendChild(tr);
-        });
-
-        // 1-10 Weighted Scoring System Updates
-        const scoreNum = document.getElementById("score-number");
-        // Using total_score formatted to 1 decimal place (e.g. 7.5 / 10)
-        scoreNum.textContent = score.total_score + " / 10"; 
-        
-        if (score.total_score >= 7.0) scoreNum.style.color = "var(--success)";
-        else if (score.total_score >= 4.0) scoreNum.style.color = "var(--warning)";
-        else scoreNum.style.color = "var(--danger)";
-
-        document.getElementById("score-rating").textContent = score.rating;
-        document.getElementById("score-rating").style.color = scoreNum.style.color;
-
-        const breakdownList = document.getElementById("score-breakdown-list");
-        breakdownList.innerHTML = "";
-        score.breakdown.forEach(item => {
-            const li = document.createElement("li");
-            li.textContent = item;
-            breakdownList.appendChild(li);
-        });
-    }
-
-    function drawChart(chartData) {
-        const container = document.getElementById("tv-chart");
-        container.innerHTML = ""; 
-        
-        if (resizeObserver) {
-            resizeObserver.disconnect();
-            resizeObserver = null;
-        }
-
-        if (!chartData.candles || chartData.candles.length === 0) {
-            container.innerHTML = "<p style='padding:20px; color:#94a3b8'>No chart data available.</p>";
+    async function analyzeStock() {
+        const ticker = tickerInput.value.trim().toUpperCase();
+        if (!ticker) {
+            showError('Please enter a valid stock ticker symbol.');
             return;
         }
 
-        document.getElementById("val-5y-high").textContent = `$${chartData.global_high.price.toFixed(2)}`;
-        document.getElementById("val-5y-low").textContent = `$${chartData.global_low.price.toFixed(2)}`;
-
-        const formattedData = chartData.candles.map(c => {
-            return {
-                time: c.date + "-01", 
-                open: c.open,
-                high: c.high,
-                low: c.low,
-                close: c.close
-            };
-        });
-
-        const FIXED_HEIGHT = 450;
-        const rect = container.getBoundingClientRect();
-        const startWidth = rect.width > 0 ? rect.width : 800;
-
-        tvChart = LightweightCharts.createChart(container, {
-            autoSize: false, 
-            width: startWidth,
-            height: FIXED_HEIGHT,
-            layout: {
-                background: { type: 'solid', color: 'transparent' },
-                textColor: '#94a3b8',
-            },
-            grid: {
-                vertLines: { color: '#334155' },
-                horzLines: { color: '#334155' },
-            },
-            crosshair: { mode: 0 },
-            rightPriceScale: { borderColor: '#334155' },
-            timeScale: { borderColor: '#334155', timeVisible: false },
-        });
-
-        const candlestickSeries = tvChart.addSeries(LightweightCharts.CandlestickSeries, {
-            upColor: '#22c55e',
-            downColor: '#ef4444',
-            borderVisible: false,
-            wickUpColor: '#22c55e',
-            wickDownColor: '#ef4444',
-            autoscaleInfoProvider: () => null, 
-        });
-
-        candlestickSeries.setData(formattedData);
-
-        candlestickSeries.applyOptions({
-            autoscaleInfoProvider: () => ({
-                priceRange: {
-                    minValue: chartData.global_low.price * 0.90, 
-                    maxValue: chartData.global_high.price * 1.10, 
-                },
-            }),
-        });
-
-        candlestickSeries.createPriceLine({
-            price: chartData.global_high.price,
-            color: '#22c55e',
-            lineWidth: 2,
-            lineStyle: 2,
-            axisLabelVisible: true,
-            title: '5Y High',
-        });
-
-        candlestickSeries.createPriceLine({
-            price: chartData.global_low.price,
-            color: '#ef4444',
-            lineWidth: 2,
-            lineStyle: 2,
-            axisLabelVisible: true,
-            title: '5Y Low',
-        });
-
-        resizeObserver = new ResizeObserver(entries => {
-            if (entries.length === 0 || entries[0].target !== container) { return; }
-            const newWidth = entries[0].contentRect.width;
-            if (newWidth > 0 && tvChart) {
-                tvChart.applyOptions({ width: newWidth }); 
+        // Reset UI state
+        resultsDiv.style.display = 'none';
+        errorDiv.style.display = 'none';
+        loadingDiv.style.display = 'block';
+        
+        try {
+            // Updated relative URL for Vercel deployment
+            const response = await fetch(`/api/analyze/${ticker}`);
+            
+            if (!response.ok) {
+                const errorData = await response.json();
+                throw new Error(errorData.detail || 'Failed to fetch data from the server.');
             }
-        });
-        resizeObserver.observe(container);
 
-        tvChart.timeScale().fitContent();
+            const data = await response.json();
+            displayResults(data, ticker);
+
+        } catch (err) {
+            console.error(err);
+            showError(`Error analyzing ${ticker}: ${err.message}`);
+        } finally {
+            loadingDiv.style.display = 'none';
+        }
+    }
+
+    function displayResults(data, ticker) {
+        // Build Top Metrics
+        document.getElementById('stockTitle').textContent = `${ticker} Fundamental Analysis`;
+        
+        const metricsHtml = `
+            <div class="metrics-grid">
+                <div class="metric-card">
+                    <h4>Forward P/E</h4>
+                    <span class="metric-value">${data.metrics.forward_pe || 'N/A'}</span>
+                </div>
+                <div class="metric-card">
+                    <h4>Dividend Yield</h4>
+                    <span class="metric-value">${data.metrics.dividend_yield ? (data.metrics.dividend_yield * 100).toFixed(2) + '%' : 'N/A'}</span>
+                </div>
+                <div class="metric-card">
+                    <h4>Revenue Growth</h4>
+                    <span class="metric-value">${data.metrics.revenue_growth ? (data.metrics.revenue_growth * 100).toFixed(2) + '%' : 'N/A'}</span>
+                </div>
+                <div class="metric-card">
+                    <h4>Price / Book</h4>
+                    <span class="metric-value">${data.metrics.price_to_book || 'N/A'}</span>
+                </div>
+                <div class="metric-card">
+                    <h4>Debt / Equity</h4>
+                    <span class="metric-value">${data.metrics.debt_to_equity || 'N/A'}</span>
+                </div>
+            </div>
+        `;
+        document.getElementById('metricsContainer').innerHTML = metricsHtml;
+
+        // Render TradingView Chart
+        renderTradingViewChart(ticker);
+
+        // Build Score Breakdown
+        renderScoreBreakdown(data.score, data.score_breakdown);
+
+        // Show Results Container
+        resultsDiv.style.display = 'block';
+    }
+
+    function renderTradingViewChart(ticker) {
+        const container = document.getElementById('chartContainer');
+        container.innerHTML = `<div id="tradingview_chart" style="height: 400px;"></div>`;
+        
+        if (window.TradingView) {
+            new window.TradingView.widget({
+                "autosize": true,
+                "symbol": ticker,
+                "interval": "W",
+                "timezone": "Etc/UTC",
+                "theme": "dark",
+                "style": "1",
+                "locale": "en",
+                "enable_publishing": false,
+                "hide_top_toolbar": false,
+                "hide_legend": false,
+                "save_image": false,
+                "container_id": "tradingview_chart",
+                "studies": [
+                    "PriceVolumeTrend@tv-basicstudies"
+                ]
+            });
+        }
+    }
+
+    function renderScoreBreakdown(totalScore, breakdown) {
+        const scoreContainer = document.getElementById('scoreContainer');
+        
+        // Determine main color
+        let mainColor = '#f44336'; // Red
+        let recommendation = 'Strong Sell';
+        
+        if (totalScore >= 70) {
+            mainColor = '#4caf50'; // Green
+            recommendation = 'Strong Buy';
+        } else if (totalScore >= 20) {
+            mainColor = '#ffeb3b'; // Yellow
+            recommendation = 'Hold / Neutral';
+        }
+
+        let breakdownHtml = `
+            <div class="score-header" style="color: ${mainColor}">
+                <h2>Score: ${totalScore.toFixed(0)} / 100</h2>
+                <h3>(${recommendation})</h3>
+            </div>
+            <div class="score-list">
+        `;
+
+        // Sort breakdown from highest weight to lowest
+        const sortedBreakdown = Object.entries(breakdown).sort((a, b) => b[1].weight - a[1].weight);
+
+        sortedBreakdown.forEach(([key, value]) => {
+            // Determine ball color for individual metric
+            let ballColor = '#f44336'; // Red
+            const percentage = (value.awarded / value.weight) * 100;
+            
+            if (percentage >= 70) {
+                ballColor = '#4caf50'; // Green
+            } else if (percentage >= 20) {
+                ballColor = '#ffeb3b'; // Yellow
+            }
+
+            breakdownHtml += `
+                <div class="score-item">
+                    <span class="score-indicator" style="background-color: ${ballColor}"></span>
+                    <span class="score-label">${formatLabel(key)}:</span>
+                    <span class="score-value">${value.awarded.toFixed(1)} / ${value.weight} pts</span>
+                </div>
+            `;
+        });
+
+        breakdownHtml += `</div>`;
+        scoreContainer.innerHTML = breakdownHtml;
+    }
+
+    function formatLabel(key) {
+        const labels = {
+            'price_vs_low': 'Price vs 1Y Low',
+            'forward_pe': 'Forward P/E',
+            'dividend_yield': 'Dividend Yield',
+            'revenue_growth': 'Revenue Growth',
+            'eps_growth': 'EPS Consistency',
+            'debt_equity': 'Debt / Equity Ratio'
+        };
+        return labels[key] || key.replace(/_/g, ' ');
+    }
+
+    function showError(message) {
+        errorDiv.textContent = message;
+        errorDiv.style.display = 'block';
+        loadingDiv.style.display = 'none';
+        resultsDiv.style.display = 'none';
     }
 });
