@@ -3,6 +3,7 @@ import requests
 import yfinance as yf
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -11,7 +12,6 @@ load_dotenv()
 FMP_API_KEY = os.getenv("FMP_API_KEY")
 BASE_URL = "https://financialmodelingprep.com/api/v3/"
 
-# This is the exact variable Vercel looks for at the root
 app = FastAPI(title="Stock Fundamentals Analyzer")
 
 app.add_middleware(
@@ -113,7 +113,6 @@ class FMPClient:
             "eps_growth_quarterly_yoy": round(eps_growth_qyoy, 2)
         }
 
-
 # --- 3. SCORING LOGIC ---
 class StockScorer:
     def scale(self, val, min_val, max_val, lower_is_better=False):
@@ -172,20 +171,28 @@ class StockScorer:
 
         return round(total_score, 1), score_details
 
-# --- 4. FASTAPI POST ROUTE ---
+# --- 4. FASTAPI ROUTES ---
 try:
     fmp = FMPClient()
     scorer = StockScorer()
 except Exception as e:
     fmp = None
 
-# Fallback GET route to verify backend is up
+# Serve the static UI files directly from FastAPI
 @app.get("/")
-@app.get("/api/analyze")
-def read_root():
-    return {"status": "FastAPI is running correctly", "detail": "Use a POST request to send the ticker payload."}
+def serve_index():
+    return FileResponse("index.html")
 
-# Multiple POST path variants to guarantee Vercel catches it regardless of proxy stripping
+@app.get("/app.js")
+def serve_js():
+    return FileResponse("app.js")
+
+@app.get("/style.css")
+def serve_css():
+    return FileResponse("style.css")
+
+
+# The POST analysis route
 @app.post("/")
 @app.post("/analyze")
 @app.post("/api/analyze")
@@ -218,7 +225,6 @@ async def analyze_stock(request: TickerRequest):
         }
     }
 
-# This uvicorn block is critical for Vercel ASGI execution
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
