@@ -159,6 +159,7 @@ class StockScorer:
 
 # --- 4. VERCEL NATIVE HANDLER ---
 class handler(BaseHTTPRequestHandler):
+
     def _set_headers(self):
         self.send_response(200)
         self.send_header('Content-type', 'application/json')
@@ -174,11 +175,11 @@ class handler(BaseHTTPRequestHandler):
     def do_GET(self):
         self._set_headers()
         self.wfile.write(json.dumps({"detail": "Analyze endpoint running. Send a POST request with {'ticker': 'AAPL'} to get data."}).encode('utf-8'))
-        return
 
     def do_POST(self):
         self._set_headers()
         ticker = None
+        
         try:
             content_length = int(self.headers.get('Content-Length', 0))
             if content_length > 0:
@@ -193,9 +194,6 @@ class handler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps({"detail": "No ticker provided in request body."}).encode('utf-8'))
             return
             
-        self._process_ticker(ticker)
-
-    def _process_ticker(self, ticker):
         fmp = FMPClient()
         scorer = StockScorer()
 
@@ -203,6 +201,7 @@ class handler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps({"detail": "API Client failed to initialize. Check Vercel Env Vars."}).encode('utf-8'))
             return
 
+        # Fetch and score
         fundamentals = fmp.get_fundamentals(ticker)
         if not fundamentals or fundamentals.get('price', 0) == 0:
             self.wfile.write(json.dumps({"detail": f"Could not find fundamental data for {ticker}"}).encode('utf-8'))
@@ -210,6 +209,7 @@ class handler(BaseHTTPRequestHandler):
 
         total_score, score_breakdown = scorer.evaluate(fundamentals)
 
+        # Return JSON
         response_data = {
             "ticker": ticker,
             "score": total_score,
@@ -222,4 +222,5 @@ class handler(BaseHTTPRequestHandler):
                 "debt_to_equity": fundamentals.get("debt_to_equity")
             }
         }
+        
         self.wfile.write(json.dumps(response_data).encode('utf-8'))
