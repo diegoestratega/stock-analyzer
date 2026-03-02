@@ -2,7 +2,7 @@ import os
 import requests
 import yfinance as yf
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -113,6 +113,7 @@ class FMPClient:
             "eps_growth_quarterly_yoy": round(eps_growth_qyoy, 2)
         }
 
+
 # --- 3. SCORING LOGIC ---
 class StockScorer:
     def scale(self, val, min_val, max_val, lower_is_better=False):
@@ -178,8 +179,15 @@ try:
 except Exception as e:
     fmp = None
 
-# Using wildcard catch-all to guarantee Vercel routing
-@app.post("/api/{path:path}")
+# Fallback GET route to verify backend is up
+@app.get("/")
+@app.get("/api/analyze")
+def read_root():
+    return {"status": "FastAPI is running correctly", "detail": "Use a POST request to send the ticker payload."}
+
+# Multiple POST path variants to guarantee Vercel catches it regardless of proxy stripping
+@app.post("/")
+@app.post("/analyze")
 @app.post("/api/analyze")
 async def analyze_stock(request: TickerRequest):
     ticker = request.ticker.strip().upper()
@@ -209,3 +217,8 @@ async def analyze_stock(request: TickerRequest):
             "debt_to_equity": fundamentals.get("debt_to_equity")
         }
     }
+
+# This uvicorn block is critical for Vercel ASGI execution
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
