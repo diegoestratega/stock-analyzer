@@ -6,12 +6,17 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from pathlib import Path
 
 # --- 1. CONFIG & SETUP ---
 load_dotenv()
 FMP_API_KEY = os.getenv("FMP_API_KEY")
 BASE_URL = "https://financialmodelingprep.com/api/v3/"
 
+# Determine the absolute directory path to prevent Vercel "Not Found" errors for HTML files
+BASE_DIR = Path(__file__).resolve().parent
+
+# This is the exact variable Vercel looks for at the root
 app = FastAPI(title="Stock Fundamentals Analyzer")
 
 app.add_middleware(
@@ -178,21 +183,30 @@ try:
 except Exception as e:
     fmp = None
 
-# Serve the static UI files directly from FastAPI
+# Serve the static UI files explicitly using absolute paths
 @app.get("/")
 def serve_index():
-    return FileResponse("index.html")
+    file_path = BASE_DIR / "index.html"
+    if not file_path.exists():
+        return {"error": "index.html not found on Vercel server", "path_checked": str(file_path)}
+    return FileResponse(file_path)
 
 @app.get("/app.js")
 def serve_js():
-    return FileResponse("app.js")
+    file_path = BASE_DIR / "app.js"
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="app.js not found")
+    return FileResponse(file_path)
 
 @app.get("/style.css")
 def serve_css():
-    return FileResponse("style.css")
+    file_path = BASE_DIR / "style.css"
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="style.css not found")
+    return FileResponse(file_path)
 
 
-# The POST analysis route
+# The POST analysis route mapped to multiple paths to outsmart Vercel proxies
 @app.post("/")
 @app.post("/analyze")
 @app.post("/api/analyze")
