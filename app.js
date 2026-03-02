@@ -25,8 +25,8 @@ document.addEventListener('DOMContentLoaded', () => {
         loadingDiv.style.display = 'block';
         
         try {
-            // Send secure POST request directly to the FastAPI index route
-            const response = await fetch(`/api/index`, {
+            // Using POST to absolutely guarantee Vercel doesn't strip the payload
+            const response = await fetch(`/api/analyze`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ ticker: ticker })
