@@ -27,7 +27,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
     try {
       // Vercel: FastAPI in api/index.py is reachable under /api/*
-      const response = await fetch(`/api/analyze/${encodeURIComponent(ticker)}`);
+      const response = await fetch(`/api/analyze/${ticker}`);
       const data = await response.json();
 
       if (!response.ok) {
