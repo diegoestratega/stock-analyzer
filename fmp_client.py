@@ -1,6 +1,8 @@
 import os
 import requests
+import time
 from datetime import datetime, date
+from urllib.parse import urlencode
 
 try:
     from dotenv import load_dotenv
@@ -8,16 +10,28 @@ try:
 except Exception:
     pass
 
-BASE_URL = "https://financialmodelingprep.com/stable"
 FMP_API_KEY = os.getenv("FMP_API_KEY")
+FMP_BASE = "https://financialmodelingprep.com/stable"
 
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15",
+]
 
 class FMPClient:
     def __init__(self):
         self.api_key = FMP_API_KEY
-        self.s = requests.Session()
-        self.s.headers.update({"User-Agent": "Mozilla/5.0"})
-        self._cache = {}  # key -> (ts, value)
+        self._cache = {}
+        self._ua_idx = 0
+
+    def _get_ua(self):
+        """Rotate user agents"""
+        ua = USER_AGENTS[self._ua_idx % len(USER_AGENTS)]
+        self._ua_idx += 1
+        return ua
 
     def _cache_get(self, key: str, ttl_sec: int):
         item = self._cache.get(key)
@@ -31,109 +45,142 @@ class FMPClient:
     def _cache_set(self, key: str, val):
         self._cache[key] = (datetime.utcnow().timestamp(), val)
 
-    def _get_json(self, endpoint: str, params: dict | None = None):
-        if not self.api_key:
-            raise RuntimeError("Missing FMP_API_KEY env var on Vercel")
+    def _get_json(self, url: str, timeout=20):
+        """Retry logic for HTTP requests with exponential backoff"""
+        headers = {"User-Agent": self._get_ua()}
+        for attempt in range(3):
+            try:
+                r = requests.get(url, headers=headers, timeout=timeout)
+                if r.status_code == 200:
+                    return r.json()
+                elif r.status_code == 429:
+                    wait = (2 ** attempt) + 1  # 1s, 3s, 7s
+                    time.sleep(wait)
+                    continue
+                else:
+                    return None
+            except Exception as e:
+                if attempt < 2:
+                    time.sleep(1)
+                continue
+        return None
 
-        if params is None:
-            params = {}
-        params["apikey"] = self.api_key
-
-        url = f"{BASE_URL}/{endpoint}"
-        r = self.s.get(url, params=params, timeout=20)
-
-        if r.status_code == 429:
-            raise RuntimeError(f"FMP rate limited (429) for {endpoint}")
-        if r.status_code != 200:
-            return None
-
+    def _get_yahoo_stock(self, ticker: str):
+        """Fetch stock data from yfinance with smart retry"""
         try:
-            return r.json()
+            import yfinance as yf
+            stock = yf.Ticker(ticker)
+            info = stock.info
+            return info if info else {}
         except Exception:
-            return None
+            return {}
 
     def getfundamentals(self, ticker: str) -> dict:
         ticker = (ticker or "").upper().strip()
-
+        
         cache_key = f"fund:{ticker}"
-        cached = self._cache_get(cache_key, ttl_sec=30)
+        cached = self._cache_get(cache_key, ttl_sec=300)  # 5 min cache
         if cached is not None:
             return cached
 
-        # 1) Quote (price, market cap, 52w high/low, PE, lastDiv, etc.)
-        # Doc endpoint: /stable/quote?symbol=AAPL [web:22]
-        quote = self._get_json("quote", {"symbol": ticker})
-        if not quote or not isinstance(quote, list) or len(quote) == 0:
-            fundamentals = {}
-            self._cache_set(cache_key, fundamentals)
-            return fundamentals
+        print(f"[INFO] Fetching fundamentals for {ticker} (Yahoo primary)")
 
-        q = quote[0] if isinstance(quote[0], dict) else {}
+        # PRIMARY: Yahoo Finance
+        info = self._get_yahoo_stock(ticker)
+        
+        if not info:
+            print(f"[WARN] Yahoo failed for {ticker}, trying FMP")
+            info = {}
 
-        price = q.get("price", 0) or 0
-        marketcap = q.get("marketCap", 0) or 0
-        high52w = q.get("yearHigh", 0) or 0
-        low52w = q.get("yearLow", 0) or 0
-        petrailing = q.get("pe", 0) or 0
-        peforward = q.get("forwardPE", 0) or 0  # may not exist; keep 0 if missing
-        last_div = q.get("lastDiv", 0) or 0
-        dividendyield = ((last_div / price) * 100) if price and last_div else 0
-
-        # 2) Debt/Equity from key-metrics-ttm
-        # Doc endpoint: /stable/key-metrics-ttm?symbol=AAPL [web:30]
+        # Extract from Yahoo with graceful fallback
+        price = info.get("currentPrice", info.get("regularMarketPrice", 0)) or 0
+        marketcap = info.get("marketCap", 0) or 0
+        high52w = info.get("fiftyTwoWeekHigh", 0) or 0
+        low52w = info.get("fiftyTwoWeekLow", 0) or 0
+        petrailing = info.get("trailingPE", 0) or 0
+        peforward = info.get("forwardPE", 0) or 0
+        
+        divrate = info.get("dividendRate", info.get("trailingAnnualDividendRate", 0)) or 0
+        dividendyield = ((divrate / price) * 100) if price and divrate else 0
+        
+        # Debt/Equity from Yahoo balance sheet
         debttoequity = 0
-        km = self._get_json("key-metrics-ttm", {"symbol": ticker})
-        if km and isinstance(km, list) and len(km) > 0 and isinstance(km[0], dict):
-            debttoequity = km[0].get("debtToEquityRatioTTM", 0) or 0
+        try:
+            bs = info.get("balancesheet")
+            if bs is not None and not bs.empty:
+                total_debt = 0
+                if "Total Debt" in bs.index:
+                    total_debt = float(bs.loc["Total Debt"].iloc[0])
+                else:
+                    st_debt = float(bs.loc["Current Debt"].iloc[0]) if "Current Debt" in bs.index else 0
+                    lt_debt = float(bs.loc["Long Term Debt"].iloc[0]) if "Long Term Debt" in bs.index else 0
+                    total_debt = st_debt + lt_debt
 
-        # 3) Growth + EPS history from income-statement quarterly
-        # Doc endpoint: /stable/income-statement?symbol=AAPL [web:46]
+                total_equity = 0
+                if "Stockholders Equity" in bs.index:
+                    total_equity = float(bs.loc["Stockholders Equity"].iloc[0])
+                elif "Total Equity Gross Minority Interest" in bs.index:
+                    total_equity = float(bs.loc["Total Equity Gross Minority Interest"].iloc[0])
+
+                if total_equity > 0:
+                    debttoequity = total_debt / total_equity
+        except Exception as e:
+            print(f"[WARN] D/E extraction failed: {e}")
+
+        # Growth + EPS from Yahoo quarterly income
         revenuegrowthannualyoy = 0
         epsgrowthannualyoy = 0
         revenuegrowthquarterlyyoy = 0
         epsgrowthquarterlyyoy = 0
         epshistory5q = []
 
-        inc = self._get_json("income-statement", {"symbol": ticker, "period": "quarter", "limit": 8})
-        if inc and isinstance(inc, list):
-            # Sort newest-first if needed (usually already newest-first)
-            def get_dt(x):
-                d = (x.get("date") or "")[:10]
-                try:
-                    return datetime.strptime(d, "%Y-%m-%d")
-                except Exception:
-                    return datetime.min
+        try:
+            qis = info.get("quarterly_income_stmt")
+            if qis is not None and not qis.empty:
+                def get_dt(x):
+                    try:
+                        return datetime.strptime(str(x)[:10], "%Y-%m-%d")
+                    except Exception:
+                        return datetime.min
 
-            inc_sorted = sorted([x for x in inc if isinstance(x, dict)], key=get_dt, reverse=True)
+                qis_sorted = qis.sort_index(key=lambda x: [get_dt(d) for d in x], ascending=False)
 
-            # EPS history 5 quarters
-            for row in inc_sorted[:5]:
-                eps_val = row.get("eps", row.get("epsDiluted", 0)) or 0
-                epshistory5q.append({"date": (row.get("date", "Unknown") or "Unknown")[:10], "eps": eps_val})
+                # EPS history
+                for idx, col in enumerate(qis_sorted.columns[:5]):
+                    eps_val = 0
+                    if "Diluted EPS" in qis_sorted.index:
+                        eps_val = float(qis_sorted.loc["Diluted EPS", col])
+                    elif "Basic EPS" in qis_sorted.index:
+                        eps_val = float(qis_sorted.loc["Basic EPS", col])
+                    epshistory5q.append({"date": str(col)[:10], "eps": eps_val})
 
-            # Quarterly YoY: Q0 vs Q4
-            if len(inc_sorted) >= 5:
-                rev0 = inc_sorted[0].get("revenue", 0) or 0
-                rev4 = inc_sorted[4].get("revenue", 0) or 0
-                if rev4:
-                    revenuegrowthquarterlyyoy = ((rev0 - rev4) / rev4) * 100
+                # Quarterly YoY: Q0 vs Q4
+                if qis_sorted.shape[1] >= 5:
+                    rev0 = float(qis_sorted.loc["Total Revenue", qis_sorted.columns[0]]) if "Total Revenue" in qis_sorted.index else 0
+                    rev4 = float(qis_sorted.loc["Total Revenue", qis_sorted.columns[4]]) if "Total Revenue" in qis_sorted.index else 0
+                    if rev4:
+                        revenuegrowthquarterlyyoy = ((rev0 - rev4) / rev4) * 100
 
-                eps0 = inc_sorted[0].get("eps", inc_sorted[0].get("epsDiluted", 0)) or 0
-                eps4 = inc_sorted[4].get("eps", inc_sorted[4].get("epsDiluted", 0)) or 0
-                if eps4:
-                    epsgrowthquarterlyyoy = ((eps0 - eps4) / abs(eps4)) * 100
+                    eps0 = 0
+                    eps4 = 0
+                    if "Diluted EPS" in qis_sorted.index:
+                        eps0 = float(qis_sorted.loc["Diluted EPS", qis_sorted.columns[0]])
+                        eps4 = float(qis_sorted.loc["Diluted EPS", qis_sorted.columns[4]])
+                    elif "Basic EPS" in qis_sorted.index:
+                        eps0 = float(qis_sorted.loc["Basic EPS", qis_sorted.columns[0]])
+                        eps4 = float(qis_sorted.loc["Basic EPS", qis_sorted.columns[4]])
+                    if eps4:
+                        epsgrowthquarterlyyoy = ((eps0 - eps4) / abs(eps4)) * 100
 
-            # Annual YoY (TTM): sum Q0..Q3 vs Q4..Q7
-            if len(inc_sorted) >= 8:
-                rev_ttm1 = sum((inc_sorted[i].get("revenue", 0) or 0) for i in range(0, 4))
-                rev_ttm2 = sum((inc_sorted[i].get("revenue", 0) or 0) for i in range(4, 8))
-                if rev_ttm2:
-                    revenuegrowthannualyoy = ((rev_ttm1 - rev_ttm2) / rev_ttm2) * 100
+                # Annual TTM: Q0..Q3 vs Q4..Q7
+                if qis_sorted.shape[1] >= 8 and "Total Revenue" in qis_sorted.index:
+                    rev_ttm1 = sum(float(qis_sorted.iloc[qis_sorted.index.get_loc("Total Revenue"), i]) for i in range(0, 4))
+                    rev_ttm2 = sum(float(qis_sorted.iloc[qis_sorted.index.get_loc("Total Revenue"), i]) for i in range(4, 8))
+                    if rev_ttm2:
+                        revenuegrowthannualyoy = ((rev_ttm1 - rev_ttm2) / rev_ttm2) * 100
 
-                eps_ttm1 = sum((inc_sorted[i].get("eps", inc_sorted[i].get("epsDiluted", 0)) or 0) for i in range(0, 4))
-                eps_ttm2 = sum((inc_sorted[i].get("eps", inc_sorted[i].get("epsDiluted", 0)) or 0) for i in range(4, 8))
-                if eps_ttm2:
-                    epsgrowthannualyoy = ((eps_ttm1 - eps_ttm2) / abs(eps_ttm2)) * 100
+        except Exception as e:
+            print(f"[WARN] Growth calc failed: {e}")
 
         fundamentals = {
             "symbol": ticker,
@@ -144,7 +191,7 @@ class FMPClient:
             "petrailing": round(float(petrailing), 2) if petrailing else 0,
             "peforward": round(float(peforward), 2) if peforward else 0,
             "dividendyield": round(float(dividendyield), 2) if dividendyield else 0,
-            "pricetobook": 0,  # optional; keep 0 unless you add another endpoint
+            "pricetobook": info.get("priceToBook", 0) or 0,
             "debttoequity": round(float(debttoequity), 2) if debttoequity else 0,
             "revenuegrowthannualyoy": round(float(revenuegrowthannualyoy), 2),
             "revenuegrowthquarterlyyoy": round(float(revenuegrowthquarterlyyoy), 2),
@@ -153,6 +200,10 @@ class FMPClient:
             "epshistory5q": epshistory5q,
         }
 
+        if not fundamentals.get("price"):
+            print(f"[ERROR] No price data for {ticker}")
+            return {}
+
         self._cache_set(cache_key, fundamentals)
         return fundamentals
 
@@ -160,77 +211,56 @@ class FMPClient:
         ticker = (ticker or "").upper().strip()
 
         cache_key = f"chart:{ticker}"
-        cached = self._cache_get(cache_key, ttl_sec=300)
+        cached = self._cache_get(cache_key, ttl_sec=7200)  # 2 hour cache
         if cached is not None:
             return cached
 
-        # Light EOD endpoint: /stable/historical-price-eod/light?symbol=AAPL [web:53]
-        raw = self._get_json("historical-price-eod/light", {"symbol": ticker})
-        if raw is None:
-            out = {"candles": [], "globalhigh": None, "globallow": None, "global_high": None, "global_low": None}
+        print(f"[INFO] Fetching chart for {ticker}")
+
+        try:
+            import yfinance as yf
+            stock = yf.Ticker(ticker)
+            hist = stock.history(period="5y")
+
+            if hist.empty:
+                print(f"[WARN] No history for {ticker}")
+                return {"candles": [], "globalhigh": None, "globallow": None}
+
+            # Aggregate to monthly
+            hist["Year_Month"] = hist.index.to_period("M")
+            monthly = hist.groupby("Year_Month").agg({
+                "Open": "first",
+                "High": "max",
+                "Low": "min",
+                "Close": "last",
+            }).reset_index()
+
+            candles = []
+            for _, row in monthly.iterrows():
+                candles.append({
+                    "date": str(row["Year_Month"]),
+                    "open": float(row["Open"]),
+                    "high": float(row["High"]),
+                    "low": float(row["Low"]),
+                    "close": float(row["Close"]),
+                })
+
+            globalhigh = None
+            globallow = None
+            for c in candles:
+                if c["high"] and (globalhigh is None or c["high"] > globalhigh["price"]):
+                    globalhigh = {"price": c["high"], "date": c["date"]}
+                if c["low"] and (globallow is None or c["low"] < globallow["price"]):
+                    globallow = {"price": c["low"], "date": c["date"]}
+
+            out = {
+                "candles": candles,
+                "globalhigh": globalhigh,
+                "globallow": globallow,
+            }
             self._cache_set(cache_key, out)
             return out
 
-        # FMP may return a list or an object; normalize to list of rows
-        rows = raw if isinstance(raw, list) else raw.get("historical", []) if isinstance(raw, dict) else []
-        if not rows:
-            out = {"candles": [], "globalhigh": None, "globallow": None, "global_high": None, "global_low": None}
-            self._cache_set(cache_key, out)
-            return out
-
-        # Keep roughly last 5 years
-        today = date.today()
-        cutoff = date(today.year - 5, today.month, min(today.day, 28))
-
-        def parse_date(s):
-            try:
-                return datetime.strptime((s or "")[:10], "%Y-%m-%d").date()
-            except Exception:
-                return None
-
-        filtered = []
-        for r in rows:
-            if not isinstance(r, dict):
-                continue
-            d = parse_date(r.get("date"))
-            if d and d >= cutoff:
-                filtered.append((d, r))
-
-        # Sort old->new so monthly aggregation is easy
-        filtered.sort(key=lambda x: x[0])
-
-        # Aggregate into monthly candles: open=first, high=max, low=min, close=last
-        by_month = {}
-        for d, r in filtered:
-            key = f"{d.year:04d}-{d.month:02d}"
-            o = float(r.get("open", 0) or 0)
-            h = float(r.get("high", 0) or 0)
-            l = float(r.get("low", 0) or 0)
-            c = float(r.get("close", 0) or 0)
-
-            if key not in by_month:
-                by_month[key] = {"date": key, "open": o, "high": h, "low": l, "close": c}
-            else:
-                by_month[key]["high"] = max(by_month[key]["high"], h)
-                by_month[key]["low"] = min(by_month[key]["low"], l if l else by_month[key]["low"])
-                by_month[key]["close"] = c
-
-        candles = list(by_month.values())
-
-        globalhigh = None
-        globallow = None
-        for c in candles:
-            if c["high"] and (globalhigh is None or c["high"] > globalhigh["price"]):
-                globalhigh = {"price": c["high"], "date": c["date"]}
-            if c["low"] and (globallow is None or c["low"] < globallow["price"]):
-                globallow = {"price": c["low"], "date": c["date"]}
-
-        out = {
-            "candles": candles,
-            "globalhigh": globalhigh,
-            "globallow": globallow,
-            "global_high": globalhigh,
-            "global_low": globallow,
-        }
-        self._cache_set(cache_key, out)
-        return out
+        except Exception as e:
+            print(f"[ERROR] Chart fetch failed: {e}")
+            return {"candles": [], "globalhigh": None, "globallow": None}
