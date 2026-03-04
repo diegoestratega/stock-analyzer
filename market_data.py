@@ -6,29 +6,33 @@ from datetime import datetime, date
 from cache_upstash import get_json, set_json
 from scoring import StockScorer
 
-# Yahoo endpoints used:
-# - Quote: https://query1.finance.yahoo.com/v7/finance/quote?symbols=AAPL (and v6 fallback)
-# - Chart: https://query1.finance.yahoo.com/v8/finance/chart/AAPL?range=5y&interval=1mo
-# (These endpoints are widely used but not official/stable, so we add caching + fallback.)
-# FMP endpoints used (Stable):
-# - Quote: /stable/quote?symbol=AAPL
-# - Light EOD: /stable/historical-price-eod/light?symbol=AAPL
+# Cache bust: change this string any time you want a clean slate in Upstash.
+CACHE_VERSION = "v2"
 
-FMP_API_KEY = os.getenv("FMP_API_KEY", "").strip()
+FMP_API_KEY = (os.getenv("FMP_API_KEY") or os.getenv("FMPAPIKEY") or "").strip()
 
-UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+UA = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/122.0.0.0 Safari/537.36"
+)
+
 sess = requests.Session()
-sess.headers.update({
-    "User-Agent": UA,
-    "Accept": "application/json,text/plain,*/*",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Referer": "https://finance.yahoo.com/",
-})
+sess.headers.update(
+    {
+        "User-Agent": UA,
+        "Accept": "application/json,text/plain,*/*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://finance.yahoo.com/",
+    }
+)
 
 scorer = StockScorer()
 
+
 def _sleep_backoff(attempt: int):
-    time.sleep(min(10, (2 ** attempt) + 0.5))
+    time.sleep(min(10, (2**attempt) + 0.5))
+
 
 def _safe_get_json(url: str, params=None, timeout=18):
     for attempt in range(3):
@@ -44,21 +48,35 @@ def _safe_get_json(url: str, params=None, timeout=18):
             _sleep_backoff(attempt)
     return None
 
+
+def _ck(key: str) -> str:
+    return f"{CACHE_VERSION}:{key}"
+
+
 # -------------------------
 # Yahoo (primary)
 # -------------------------
 def _yahoo_quote(ticker: str) -> dict | None:
     # Try v7 then v6 (some environments block one but not the other)
-    for base in ("https://query1.finance.yahoo.com/v7/finance/quote",
-                 "https://query1.finance.yahoo.com/v6/finance/quote"):
+    for base in (
+        "https://query1.finance.yahoo.com/v7/finance/quote",
+        "https://query1.finance.yahoo.com/v6/finance/quote",
+    ):
         data = _safe_get_json(base, params={"symbols": ticker})
         if not data:
             continue
+
         res = (data.get("quoteResponse") or {}).get("result") or []
         if not res:
             continue
+
         q = res[0] or {}
-        price = q.get("regularMarketPrice") or q.get("postMarketPrice") or q.get("preMarketPrice") or 0
+        price = (
+            q.get("regularMarketPrice")
+            or q.get("postMarketPrice")
+            or q.get("preMarketPrice")
+            or 0
+        )
         if not price:
             continue
 
@@ -77,7 +95,9 @@ def _yahoo_quote(ticker: str) -> dict | None:
             "dividend_yield": float(div_yield or 0),
             "price_to_book": float(q.get("priceToBook") or 0),
         }
+
     return None
+
 
 def _yahoo_chart_5y_monthly(ticker: str) -> dict | None:
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
@@ -110,9 +130,16 @@ def _yahoo_chart_5y_monthly(ticker: str) -> dict | None:
         o, h, l, c = opens[i], highs[i], lows[i], closes[i]
         if o is None or h is None or l is None or c is None:
             continue
+
         d = datetime.utcfromtimestamp(ts[i])
         ym = f"{d.year:04d}-{d.month:02d}"
-        candle = {"date": ym, "open": float(o), "high": float(h), "low": float(l), "close": float(c)}
+        candle = {
+            "date": ym,
+            "open": float(o),
+            "high": float(h),
+            "low": float(l),
+            "close": float(c),
+        }
         candles.append(candle)
 
         if global_high is None or candle["high"] > global_high["price"]:
@@ -132,6 +159,7 @@ def _yahoo_chart_5y_monthly(ticker: str) -> dict | None:
         "globallow": global_low,
     }
 
+
 # -------------------------
 # FMP (fallback)
 # -------------------------
@@ -143,10 +171,12 @@ def _fmp_get(endpoint: str, params: dict):
     p["apikey"] = FMP_API_KEY
     return _safe_get_json(f"{base}/{endpoint}", params=p, timeout=22)
 
+
 def _fmp_quote(ticker: str) -> dict | None:
     data = _fmp_get("quote", {"symbol": ticker})
     if not isinstance(data, list) or not data:
         return None
+
     q = data[0] if isinstance(data[0], dict) else {}
     price = q.get("price") or 0
     if not price:
@@ -167,12 +197,17 @@ def _fmp_quote(ticker: str) -> dict | None:
         "price_to_book": float(q.get("priceToBook") or 0),
     }
 
+
 def _fmp_chart_5y_monthly(ticker: str) -> dict | None:
     raw = _fmp_get("historical-price-eod/light", {"symbol": ticker})
     if raw is None:
         return None
 
-    rows = raw if isinstance(raw, list) else (raw.get("historical") if isinstance(raw, dict) else None)
+    rows = (
+        raw
+        if isinstance(raw, list)
+        else (raw.get("historical") if isinstance(raw, dict) else None)
+    )
     if not isinstance(rows, list) or not rows:
         return None
 
@@ -185,7 +220,6 @@ def _fmp_chart_5y_monthly(ticker: str) -> dict | None:
         except Exception:
             return None
 
-    # old->new
     filtered = []
     for r in rows:
         if not isinstance(r, dict):
@@ -193,7 +227,7 @@ def _fmp_chart_5y_monthly(ticker: str) -> dict | None:
         d = parse_date(r.get("date"))
         if d and d >= cutoff:
             filtered.append((d, r))
-    filtered.sort(key=lambda x: x[0])
+    filtered.sort(key=lambda x: x[0])  # old -> new
 
     if not filtered:
         return None
@@ -236,9 +270,10 @@ def _fmp_chart_5y_monthly(ticker: str) -> dict | None:
         "globallow": global_low,
     }
 
+
 def _fmp_growth_eps_enrich(ticker: str) -> dict:
     # Optional enrichment; cache 24h because FMP free is tight
-    cache_key = f"fmp:enrich:{ticker}"
+    cache_key = _ck(f"fmp:enrich:{ticker}")
     cached = get_json(cache_key)
     if cached:
         return cached
@@ -258,6 +293,7 @@ def _fmp_growth_eps_enrich(ticker: str) -> dict:
 
     inc = _fmp_get("income-statement", {"symbol": ticker, "period": "quarter", "limit": 8})
     if isinstance(inc, list) and inc:
+
         def dt(x):
             try:
                 return datetime.strptime((x.get("date") or "")[:10], "%Y-%m-%d")
@@ -267,7 +303,10 @@ def _fmp_growth_eps_enrich(ticker: str) -> dict:
         rows = sorted([x for x in inc if isinstance(x, dict)], key=dt, reverse=True)
 
         out["eps_history_5q"] = [
-            {"date": (r.get("date") or "Unknown")[:10], "eps": float((r.get("eps") or r.get("epsDiluted") or 0))}
+            {
+                "date": (r.get("date") or "Unknown")[:10],
+                "eps": float((r.get("eps") or r.get("epsDiluted") or 0)),
+            }
             for r in rows[:5]
         ]
 
@@ -296,6 +335,7 @@ def _fmp_growth_eps_enrich(ticker: str) -> dict:
     set_json(cache_key, out, ttl_seconds=24 * 3600)
     return out
 
+
 def _for_scoring(f: dict) -> dict:
     return {
         "price": f.get("price", 0) or 0,
@@ -308,14 +348,21 @@ def _for_scoring(f: dict) -> dict:
         "epsgrowthquarterlyyoy": f.get("eps_growth_quarterly_yoy", 0) or 0,
     }
 
+
 def get_analysis(ticker: str, debug: bool = False) -> dict | None:
-    # Short cache for UI
-    main_key = f"analysis:{ticker}"
+    main_key = _ck(f"analysis:{ticker}")
     cached = get_json(main_key)
     if cached:
+        if debug and "debug" not in cached:
+            cached["debug"] = {"served": "cache", "cache_version": CACHE_VERSION}
         return cached
 
-    debug_info = {"quote_source": None, "chart_source": None, "enrich_source": None}
+    debug_info = {
+        "cache_version": CACHE_VERSION,
+        "quote_source": None,
+        "chart_source": None,
+        "enrich_source": None,
+    }
 
     # Quote: Yahoo -> FMP
     quote = _yahoo_quote(ticker)
@@ -326,9 +373,9 @@ def get_analysis(ticker: str, debug: bool = False) -> dict | None:
         if quote:
             debug_info["quote_source"] = "fmp"
 
+    lastgood_key = _ck(f"analysis:lastgood:{ticker}")
     if not quote:
-        # Serve last good if available
-        last_good = get_json(f"analysis:lastgood:{ticker}")
+        last_good = get_json(lastgood_key)
         if last_good:
             last_good["stale"] = True
             if debug:
@@ -337,20 +384,24 @@ def get_analysis(ticker: str, debug: bool = False) -> dict | None:
         return None
 
     # Enrich (optional): FMP cached 24h
-    enrich = _fmp_growth_eps_enrich(ticker) if FMP_API_KEY else {
-        "debt_to_equity": 0.0,
-        "revenue_growth_annual_yoy": 0.0,
-        "revenue_growth_quarterly_yoy": 0.0,
-        "eps_growth_annual_yoy": 0.0,
-        "eps_growth_quarterly_yoy": 0.0,
-        "eps_history_5q": [],
-    }
-    debug_info["enrich_source"] = "fmp" if FMP_API_KEY else "none"
+    if FMP_API_KEY:
+        enrich = _fmp_growth_eps_enrich(ticker)
+        debug_info["enrich_source"] = "fmp"
+    else:
+        enrich = {
+            "debt_to_equity": 0.0,
+            "revenue_growth_annual_yoy": 0.0,
+            "revenue_growth_quarterly_yoy": 0.0,
+            "eps_growth_annual_yoy": 0.0,
+            "eps_growth_quarterly_yoy": 0.0,
+            "eps_history_5q": [],
+        }
+        debug_info["enrich_source"] = "none"
 
     funds = {**quote, **enrich}
 
     # Chart cached separately (6h): Yahoo -> FMP
-    chart_key = f"chart:{ticker}"
+    chart_key = _ck(f"chart:{ticker}")
     chart = get_json(chart_key)
     if not chart:
         chart = _yahoo_chart_5y_monthly(ticker)
@@ -360,35 +411,54 @@ def get_analysis(ticker: str, debug: bool = False) -> dict | None:
             chart = _fmp_chart_5y_monthly(ticker)
             if chart:
                 debug_info["chart_source"] = "fmp"
+
         if not chart:
-            chart = {"candles": [], "global_high": None, "global_low": None, "globalhigh": None, "globallow": None}
+            chart = {
+                "candles": [],
+                "global_high": None,
+                "global_low": None,
+                "globalhigh": None,
+                "globallow": None,
+            }
+
         set_json(chart_key, chart, ttl_seconds=6 * 3600)
 
-    # Score (your scoring.py expects these keys)
+    # Score
     score = scorer.evaluate(_for_scoring(funds))
 
-    # Provide compatibility keys for frontend/backends that expect old names
-    funds_compat = dict(funds)
-    funds_compat.update({
-        "marketcap": funds.get("market_cap", 0),
-        "high52w": funds.get("high_52w", 0),
-        "low52w": funds.get("low_52w", 0),
-        "petrailing": funds.get("pe_trailing", 0),
-        "peforward": funds.get("pe_forward", 0),
-        "dividendyield": funds.get("dividend_yield", 0),
-        "pricetobook": funds.get("price_to_book", 0),
-        "debttoequity": funds.get("debt_to_equity", 0),
-        "revenuegrowthannualyoy": funds.get("revenue_growth_annual_yoy", 0),
-        "revenuegrowthquarterlyyoy": funds.get("revenue_growth_quarterly_yoy", 0),
-        "epsgrowthannualyoy": funds.get("eps_growth_annual_yoy", 0),
-        "epsgrowthquarterlyyoy": funds.get("eps_growth_quarterly_yoy", 0),
-        "epshistory5q": funds.get("eps_history_5q", []),
-    })
+    # Force the fields you were searching for to always exist in the JSON
+    # (both snake_case + legacy names the UI might reference).
+    funds_out = dict(funds)
+    funds_out.setdefault("pe_trailing", 0.0)
+    funds_out.setdefault("pe_forward", 0.0)
+    funds_out.setdefault("debt_to_equity", 0.0)
+    funds_out.setdefault("eps_history_5q", [])
+    funds_out.setdefault("market_cap", 0.0)
+    funds_out.setdefault("price_to_book", 0.0)
 
-    out = {"ticker": ticker, "fundamentals": funds_compat, "chart": chart, "score": score}
+    # Legacy compatibility keys
+    funds_out.update(
+        {
+            "marketcap": funds_out.get("market_cap", 0),
+            "high52w": funds_out.get("high_52w", 0),
+            "low52w": funds_out.get("low_52w", 0),
+            "petrailing": funds_out.get("pe_trailing", 0),
+            "peforward": funds_out.get("pe_forward", 0),
+            "dividendyield": funds_out.get("dividend_yield", 0),
+            "pricetobook": funds_out.get("price_to_book", 0),
+            "debttoequity": funds_out.get("debt_to_equity", 0),
+            "revenuegrowthannualyoy": funds_out.get("revenue_growth_annual_yoy", 0),
+            "revenuegrowthquarterlyyoy": funds_out.get("revenue_growth_quarterly_yoy", 0),
+            "epsgrowthannualyoy": funds_out.get("eps_growth_annual_yoy", 0),
+            "epsgrowthquarterlyyoy": funds_out.get("eps_growth_quarterly_yoy", 0),
+            "epshistory5q": funds_out.get("eps_history_5q", []),
+        }
+    )
+
+    out = {"ticker": ticker, "fundamentals": funds_out, "chart": chart, "score": score}
     if debug:
         out["debug"] = debug_info
 
     set_json(main_key, out, ttl_seconds=5 * 60)
-    set_json(f"analysis:lastgood:{ticker}", out, ttl_seconds=7 * 24 * 3600)
+    set_json(lastgood_key, out, ttl_seconds=7 * 24 * 3600)
     return out
