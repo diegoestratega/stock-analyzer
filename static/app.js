@@ -4,7 +4,11 @@ document.addEventListener("DOMContentLoaded", () => {
   const dashboard = document.getElementById("dashboard");
   const errorMsg = document.getElementById("error-message");
 
-  let tvChart = null;
+  let chart = null;
+  let resizeObserver = null;
+
+  const get = (obj, a, b, dflt = 0) =>
+    (obj && obj[a] !== undefined ? obj[a] : (obj && obj[b] !== undefined ? obj[b] : dflt));
 
   btn.addEventListener("click", () => {
     const ticker = input.value.trim().toUpperCase();
@@ -25,17 +29,15 @@ document.addEventListener("DOMContentLoaded", () => {
     btn.disabled = true;
 
     try {
-      const response = await fetch(`/api/analyze/${ticker}`);
+      const response = await fetch(`/api/analyze/${ticker}`, { cache: "no-store" });
       const data = await response.json();
-
-      if (!response.ok) throw new Error(data.detail || "API error");
+      if (!response.ok) throw new Error(data.detail || "Failed to fetch data");
 
       populateDashboard(data);
       dashboard.classList.remove("hidden");
-
       setTimeout(() => drawChart(data.chart), 50);
     } catch (err) {
-      errorMsg.textContent = err.message || String(err);
+      errorMsg.textContent = err.message;
       errorMsg.classList.remove("hidden");
     } finally {
       btn.textContent = "Analyze";
@@ -43,98 +45,134 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   }
 
-  function formatMoney(num) {
-    const n = Number(num || 0);
-    if (!isFinite(n)) return "—";
-    if (n >= 1e12) return (n / 1e12).toFixed(2) + "T";
-    if (n >= 1e9) return (n / 1e9).toFixed(2) + "B";
-    if (n >= 1e6) return (n / 1e6).toFixed(2) + "M";
-    return n.toLocaleString();
-  }
-
-  function formatPct(num) {
-    const n = Number(num);
-    if (!isFinite(n)) return "—";
-    return n.toFixed(2) + "%";
-  }
-
   function populateDashboard(data) {
     const f = data.fundamentals || {};
     const s = data.score || {};
 
-    document.getElementById("stock-symbol").textContent = f.symbol || data.ticker || "—";
-    document.getElementById("stock-price").textContent = isFinite(Number(f.price)) ? Number(f.price).toFixed(2) : "—";
+    const symbol = f.symbol || data.ticker || "";
+    const price = get(f, "price", "price", 0);
 
-    const sym = (f.symbol || data.ticker || "").toLowerCase();
-    if (sym) {
-      document.getElementById("stockanalysis-link").href =
-        `https://stockanalysis.com/stocks/${sym}/financials/?p=quarterly`;
+    document.getElementById("stock-symbol").textContent = symbol;
+    document.getElementById("stock-price").textContent = price ? `$${Number(price).toFixed(2)}` : "—";
+
+    const sa = document.getElementById("stockanalysis-link");
+    if (sa) sa.href = `https://stockanalysis.com/stocks/${String(symbol).toLowerCase()}/financials/?p=quarterly`;
+
+    const formatMoney = (num) => {
+      num = Number(num || 0);
+      if (num >= 1e12) return `$${(num / 1e12).toFixed(2)}T`;
+      if (num >= 1e9) return `$${(num / 1e9).toFixed(2)}B`;
+      if (num >= 1e6) return `$${(num / 1e6).toFixed(2)}M`;
+      return `$${num.toLocaleString()}`;
+    };
+    const formatPct = (num) => `${Number(num || 0).toFixed(2)}%`;
+
+    // Key metrics (support both snake_case and legacy names)
+    const mcap = get(f, "market_cap", "marketcap", 0);
+    const peT = get(f, "pe_trailing", "petrailing", 0);
+    const peF = get(f, "pe_forward", "peforward", 0);
+    const pb = get(f, "price_to_book", "pricetobook", 0);
+    const de = get(f, "debt_to_equity", "debttoequity", 0);
+    const div = get(f, "dividend_yield", "dividendyield", 0);
+
+    document.getElementById("val-mcap").textContent = mcap ? formatMoney(mcap) : "—";
+    document.getElementById("val-pe-trail").textContent = peT > 0 ? Number(peT).toFixed(2) : "N/A";
+    document.getElementById("val-pe-fwd").textContent = peF > 0 ? Number(peF).toFixed(2) : "N/A";
+    document.getElementById("val-pb").textContent = pb > 0 ? Number(pb).toFixed(2) : "N/A";
+    document.getElementById("val-de").textContent = Number(de || 0).toFixed(2);
+    document.getElementById("val-div").textContent = div > 0 ? formatPct(div) : "None";
+
+    const hi1y = get(f, "high_52w", "high52w", 0);
+    const lo1y = get(f, "low_52w", "low52w", 0);
+
+    const el1yHigh = document.getElementById("val-1y-high");
+    if (el1yHigh) el1yHigh.textContent = hi1y > 0 ? `$${Number(hi1y).toFixed(2)}` : "N/A";
+    const el1yLow = document.getElementById("val-1y-low");
+    if (el1yLow) el1yLow.textContent = lo1y > 0 ? `$${Number(lo1y).toFixed(2)}` : "N/A";
+
+    // Growth
+    const revAnn = get(f, "revenue_growth_annual_yoy", "revenuegrowthannualyoy", 0);
+    const revQ = get(f, "revenue_growth_quarterly_yoy", "revenuegrowthquarterlyyoy", 0);
+    const epsAnn = get(f, "eps_growth_annual_yoy", "epsgrowthannualyoy", 0);
+    const epsQ = get(f, "eps_growth_quarterly_yoy", "epsgrowthquarterlyyoy", 0);
+
+    const revgAnnEl = document.getElementById("val-revg-ann");
+    revgAnnEl.textContent = formatPct(revAnn);
+    revgAnnEl.style.color = revAnn >= 0 ? "var(--success)" : "var(--danger)";
+
+    const revgQEl = document.getElementById("val-revg-qtr");
+    revgQEl.textContent = formatPct(revQ);
+    revgQEl.style.color = revQ >= 0 ? "var(--success)" : "var(--danger)";
+
+    const epsgAnnEl = document.getElementById("val-epsg-ann");
+    epsgAnnEl.textContent = formatPct(epsAnn);
+    epsgAnnEl.style.color = epsAnn >= 0 ? "var(--success)" : "var(--danger)";
+
+    const epsgQEl = document.getElementById("val-epsg-qtr");
+    epsgQEl.textContent = formatPct(epsQ);
+    epsgQEl.style.color = epsQ >= 0 ? "var(--success)" : "var(--danger)";
+
+    // EPS table
+    const epsHist = f.eps_history_5q || f.epshistory5q || [];
+    const tbody = document.querySelector("#eps-table tbody");
+    if (tbody) {
+      tbody.innerHTML = "";
+      epsHist.forEach((q) => {
+        const tr = document.createElement("tr");
+        const dt = (q.date || "").toString();
+        const eps = Number(q.eps || 0);
+        tr.innerHTML = `<td>${dt}</td><td>${eps.toFixed(2)}</td>`;
+        tbody.appendChild(tr);
+      });
     }
 
-    document.getElementById("val-mcap").textContent = formatMoney(f.marketcap);
-    document.getElementById("val-div").textContent =
-      isFinite(Number(f.dividendyield)) && Number(f.dividendyield) > 0 ? formatPct(f.dividendyield) : "—";
-    document.getElementById("val-pe-trail").textContent =
-      isFinite(Number(f.petrailing)) && Number(f.petrailing) > 0 ? Number(f.petrailing).toFixed(2) : "—";
-    document.getElementById("val-pe-fwd").textContent =
-      isFinite(Number(f.peforward)) && Number(f.peforward) > 0 ? Number(f.peforward).toFixed(2) : "—";
-    document.getElementById("val-de").textContent =
-      isFinite(Number(f.debttoequity)) ? Number(f.debttoequity).toFixed(2) : "—";
-    document.getElementById("val-pb").textContent =
-      isFinite(Number(f.pricetobook)) && Number(f.pricetobook) > 0 ? Number(f.pricetobook).toFixed(2) : "—";
+    // Score (support both key names)
+    const total = s.total_score ?? s.totalscore ?? 0;
+    const grade = s.final_grade ?? s.finalgrade ?? total;
 
-    document.getElementById("val-revg-ann").textContent = formatPct(f.revenuegrowthannualyoy);
-    document.getElementById("val-revg-qtr").textContent = formatPct(f.revenuegrowthquarterlyyoy);
-    document.getElementById("val-epsg-ann").textContent = formatPct(f.epsgrowthannualyoy);
-    document.getElementById("val-epsg-qtr").textContent = formatPct(f.epsgrowthquarterlyyoy);
+    const scoreNum = document.getElementById("score-number");
+    const scoreRating = document.getElementById("score-rating");
 
-    document.getElementById("val-1y-high").textContent =
-      isFinite(Number(f.high52w)) && Number(f.high52w) > 0 ? Number(f.high52w).toFixed(2) : "—";
-    document.getElementById("val-1y-low").textContent =
-      isFinite(Number(f.low52w)) && Number(f.low52w) > 0 ? Number(f.low52w).toFixed(2) : "—";
-
-    const scoreNumber =
-      (s.finalgrade ?? s.score_100 ?? s.totalscore);
-    document.getElementById("score-number").textContent =
-      isFinite(Number(scoreNumber)) ? Number(scoreNumber).toFixed(1) : "—";
-    document.getElementById("score-rating").textContent = s.rating || "—";
-
-    const tbody = document.querySelector("#eps-table tbody");
-    tbody.innerHTML = "";
-    const eps = Array.isArray(f.epshistory5q) ? f.epshistory5q : [];
-    eps.forEach((q) => {
-      const tr = document.createElement("tr");
-      const epsVal = isFinite(Number(q.eps)) ? Number(q.eps).toFixed(2) : "—";
-      tr.innerHTML = `<td>${q.date || "—"}</td><td>${epsVal}</td>`;
-      tbody.appendChild(tr);
-    });
+    if (scoreNum) {
+      scoreNum.textContent = `${Number(grade).toFixed(1)} ${s.rating || ""}`.trim();
+      let color = "var(--danger)";
+      if (grade >= 80) color = "var(--success)";
+      else if (grade >= 45) color = "var(--warning)";
+      scoreNum.style.color = color;
+      if (scoreRating) {
+        scoreRating.textContent = s.rating || "";
+        scoreRating.style.color = color;
+      }
+    }
 
     const breakdownList = document.getElementById("score-breakdown-list");
-    breakdownList.innerHTML = "";
-    const breakdown = Array.isArray(s.breakdown) ? s.breakdown : [];
-    breakdown.forEach((item) => {
-      const li = document.createElement("li");
-      li.textContent = item;
-      breakdownList.appendChild(li);
-    });
+    if (breakdownList) {
+      breakdownList.innerHTML = "";
+      (s.breakdown || []).forEach((item) => {
+        const li = document.createElement("li");
+        li.textContent = item;
+        breakdownList.appendChild(li);
+      });
+    }
   }
 
   function drawChart(chartData) {
     const container = document.getElementById("tv-chart");
+    if (!container) return;
+
     container.innerHTML = "";
 
-    if (tvChart) {
-      try { tvChart.remove(); } catch {}
-      tvChart = null;
+    if (resizeObserver) {
+      resizeObserver.disconnect();
+      resizeObserver = null;
     }
 
-    const candles = chartData && Array.isArray(chartData.candles) ? chartData.candles : [];
-    if (!candles.length) {
-      container.innerHTML = `<div style="padding:14px;color:#94a3b8">No chart data available</div>`;
+    if (!chartData || !chartData.candles || chartData.candles.length === 0) {
+      container.innerHTML = `<p style="padding:20px;color:#94a3b8">No chart data available.</p>`;
       return;
     }
 
-    const formatted = candles.map(c => ({
+    const formatted = chartData.candles.map((c) => ({
       time: `${c.date}-01`,
       open: c.open,
       high: c.high,
@@ -142,18 +180,21 @@ document.addEventListener("DOMContentLoaded", () => {
       close: c.close,
     }));
 
-    const width = container.getBoundingClientRect().width || 900;
+    const rect = container.getBoundingClientRect();
+    const width = rect.width > 0 ? rect.width : 800;
+    const height = 450;
 
-    tvChart = LightweightCharts.createChart(container, {
+    chart = LightweightCharts.createChart(container, {
       width,
-      height: 480,
+      height,
       layout: { background: { type: "solid", color: "transparent" }, textColor: "#94a3b8" },
       grid: { vertLines: { color: "#334155" }, horzLines: { color: "#334155" } },
+      crosshair: { mode: 0 },
       rightPriceScale: { borderColor: "#334155" },
       timeScale: { borderColor: "#334155" },
     });
 
-    const series = tvChart.addCandlestickSeries({
+    const series = chart.addCandlestickSeries({
       upColor: "#22c55e",
       downColor: "#ef4444",
       borderVisible: false,
@@ -162,12 +203,23 @@ document.addEventListener("DOMContentLoaded", () => {
     });
 
     series.setData(formatted);
-    tvChart.timeScale().fitContent();
 
-    window.addEventListener("resize", () => {
-      if (!tvChart) return;
-      const w = container.getBoundingClientRect().width || 900;
-      tvChart.applyOptions({ width: w });
+    const gh = chartData.global_high || chartData.globalhigh;
+    const gl = chartData.global_low || chartData.globallow;
+
+    if (gh && gh.price) {
+      series.createPriceLine({ price: gh.price, color: "#22c55e", lineWidth: 2, lineStyle: 2, axisLabelVisible: true, title: "5Y High" });
+    }
+    if (gl && gl.price) {
+      series.createPriceLine({ price: gl.price, color: "#ef4444", lineWidth: 2, lineStyle: 2, axisLabelVisible: true, title: "5Y Low" });
+    }
+
+    resizeObserver = new ResizeObserver((entries) => {
+      const w = entries[0]?.contentRect?.width || 0;
+      if (w > 0) chart.applyOptions({ width: w });
     });
+    resizeObserver.observe(container);
+
+    chart.timeScale().fitContent();
   }
 });

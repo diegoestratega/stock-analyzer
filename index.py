@@ -1,13 +1,9 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 
-from fmp_client import FMPClient
-from scoring import StockScorer
+from market_data import get_analysis
 
 app = FastAPI(title="Stock Fundamentals Analyzer")
-
-fmp = FMPClient()
-scorer = StockScorer()
 
 @app.get("/api/health")
 def health():
@@ -15,21 +11,14 @@ def health():
 
 @app.get("/api/analyze/{ticker}")
 def analyze(ticker: str):
-    ticker = ticker.upper().strip()
+    ticker = (ticker or "").upper().strip()
+    if not ticker.isalnum():
+        raise HTTPException(status_code=400, detail="Invalid ticker")
 
-    try:
-        fundamentals = fmp.getfundamentals(ticker)
-        if not fundamentals or float(fundamentals.get("price", 0) or 0) <= 0:
-            raise HTTPException(status_code=404, detail=f"Could not find data for {ticker}")
+    data = get_analysis(ticker)
+    if not data:
+        raise HTTPException(status_code=404, detail=f"Could not find data for {ticker}")
+    return data
 
-        chart = fmp.get5y_monthly_chart(ticker)
-        score = scorer.evaluate(fundamentals)
-
-        return {"ticker": ticker, "fundamentals": fundamentals, "chart": chart, "score": score}
-
-    except RuntimeError as e:
-        # This catches "Missing FMP_API_KEY" and "FMP rate limited (429)..."
-        raise HTTPException(status_code=503, detail=str(e))
-
-# UI LAST
+# UI (serves /, /app.js, etc. from ./static)
 app.mount("/", StaticFiles(directory="static", html=True), name="ui")
