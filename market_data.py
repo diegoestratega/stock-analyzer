@@ -6,8 +6,8 @@ from datetime import datetime, date
 from cache_upstash import get_json, set_json
 from scoring import StockScorer
 
-# Cache bust: change this string any time you want a clean slate in Upstash.
-CACHE_VERSION = "v2"
+# Cache bust: change this to wipe all old Upstash keys instantly.
+CACHE_VERSION = "v3"
 
 FMP_API_KEY = (os.getenv("FMP_API_KEY") or os.getenv("FMPAPIKEY") or "").strip()
 
@@ -30,6 +30,10 @@ sess.headers.update(
 scorer = StockScorer()
 
 
+def _ck(key: str) -> str:
+    return f"{CACHE_VERSION}:{key}"
+
+
 def _sleep_backoff(attempt: int):
     time.sleep(min(10, (2**attempt) + 0.5))
 
@@ -49,15 +53,26 @@ def _safe_get_json(url: str, params=None, timeout=18):
     return None
 
 
-def _ck(key: str) -> str:
-    return f"{CACHE_VERSION}:{key}"
+def _num(x, dflt=0.0) -> float:
+    try:
+        if x is None:
+            return dflt
+        return float(x)
+    except Exception:
+        return dflt
+
+
+def _first(d: dict, keys: list[str], dflt=0.0):
+    for k in keys:
+        if k in d and d[k] is not None:
+            return d[k]
+    return dflt
 
 
 # -------------------------
 # Yahoo (primary)
 # -------------------------
 def _yahoo_quote(ticker: str) -> dict | None:
-    # Try v7 then v6 (some environments block one but not the other)
     for base in (
         "https://query1.finance.yahoo.com/v7/finance/quote",
         "https://query1.finance.yahoo.com/v6/finance/quote",
@@ -80,20 +95,21 @@ def _yahoo_quote(ticker: str) -> dict | None:
         if not price:
             continue
 
-        div_yield = q.get("dividendYield") or 0  # may be fraction
+        div_yield = q.get("dividendYield") or 0  # sometimes fraction
+        div_yield = _num(div_yield, 0.0)
         if div_yield and div_yield < 1:
-            div_yield = div_yield * 100
+            div_yield *= 100
 
         return {
             "symbol": ticker,
-            "price": float(price),
-            "market_cap": float(q.get("marketCap") or 0),
-            "high_52w": float(q.get("fiftyTwoWeekHigh") or 0),
-            "low_52w": float(q.get("fiftyTwoWeekLow") or 0),
-            "pe_trailing": float(q.get("trailingPE") or 0),
-            "pe_forward": float(q.get("forwardPE") or 0),
-            "dividend_yield": float(div_yield or 0),
-            "price_to_book": float(q.get("priceToBook") or 0),
+            "price": _num(price),
+            "market_cap": _num(q.get("marketCap")),
+            "high_52w": _num(q.get("fiftyTwoWeekHigh")),
+            "low_52w": _num(q.get("fiftyTwoWeekLow")),
+            "pe_trailing": _num(q.get("trailingPE")),
+            "pe_forward": _num(q.get("forwardPE")),
+            "dividend_yield": _num(div_yield),
+            "price_to_book": _num(q.get("priceToBook")),
         }
 
     return None
@@ -133,13 +149,7 @@ def _yahoo_chart_5y_monthly(ticker: str) -> dict | None:
 
         d = datetime.utcfromtimestamp(ts[i])
         ym = f"{d.year:04d}-{d.month:02d}"
-        candle = {
-            "date": ym,
-            "open": float(o),
-            "high": float(h),
-            "low": float(l),
-            "close": float(c),
-        }
+        candle = {"date": ym, "open": _num(o), "high": _num(h), "low": _num(l), "close": _num(c)}
         candles.append(candle)
 
         if global_high is None or candle["high"] > global_high["price"]:
@@ -154,7 +164,6 @@ def _yahoo_chart_5y_monthly(ticker: str) -> dict | None:
         "candles": candles,
         "global_high": global_high,
         "global_low": global_low,
-        # backward compat keys
         "globalhigh": global_high,
         "globallow": global_low,
     }
@@ -178,23 +187,24 @@ def _fmp_quote(ticker: str) -> dict | None:
         return None
 
     q = data[0] if isinstance(data[0], dict) else {}
-    price = q.get("price") or 0
+    price = _num(q.get("price"))
     if not price:
         return None
 
-    last_div = q.get("lastDiv") or 0
+    last_div = _num(q.get("lastDiv"), 0.0)
     dividend_yield = ((last_div / price) * 100.0) if (price and last_div) else 0.0
 
     return {
         "symbol": ticker,
-        "price": float(price),
-        "market_cap": float(q.get("marketCap") or 0),
-        "high_52w": float(q.get("yearHigh") or 0),
-        "low_52w": float(q.get("yearLow") or 0),
-        "pe_trailing": float(q.get("pe") or 0),
-        "pe_forward": float(q.get("forwardPE") or 0),
-        "dividend_yield": float(dividend_yield),
-        "price_to_book": float(q.get("priceToBook") or 0),
+        "price": price,
+        "market_cap": _num(q.get("marketCap")),
+        "high_52w": _num(q.get("yearHigh")),
+        "low_52w": _num(q.get("yearLow")),
+        # these may be missing in some responses; we’ll fill via enrich
+        "pe_trailing": _num(q.get("pe")),
+        "pe_forward": _num(q.get("forwardPE")),
+        "dividend_yield": _num(dividend_yield),
+        "price_to_book": _num(q.get("priceToBook")),
     }
 
 
@@ -203,11 +213,7 @@ def _fmp_chart_5y_monthly(ticker: str) -> dict | None:
     if raw is None:
         return None
 
-    rows = (
-        raw
-        if isinstance(raw, list)
-        else (raw.get("historical") if isinstance(raw, dict) else None)
-    )
+    rows = raw if isinstance(raw, list) else (raw.get("historical") if isinstance(raw, dict) else None)
     if not isinstance(rows, list) or not rows:
         return None
 
@@ -227,19 +233,18 @@ def _fmp_chart_5y_monthly(ticker: str) -> dict | None:
         d = parse_date(r.get("date"))
         if d and d >= cutoff:
             filtered.append((d, r))
-    filtered.sort(key=lambda x: x[0])  # old -> new
+    filtered.sort(key=lambda x: x[0])
 
     if not filtered:
         return None
 
-    # Monthly aggregation
     by_month = {}
     for d, r in filtered:
         key = f"{d.year:04d}-{d.month:02d}"
-        o = float(r.get("open") or 0)
-        h = float(r.get("high") or 0)
-        l = float(r.get("low") or 0)
-        c = float(r.get("close") or 0)
+        o = _num(r.get("open"))
+        h = _num(r.get("high"))
+        l = _num(r.get("low"))
+        c = _num(r.get("close"))
         if not (o and h and l and c):
             continue
 
@@ -271,8 +276,7 @@ def _fmp_chart_5y_monthly(ticker: str) -> dict | None:
     }
 
 
-def _fmp_growth_eps_enrich(ticker: str) -> dict:
-    # Optional enrichment; cache 24h because FMP free is tight
+def _fmp_growth_eps_enrich(ticker: str, price: float) -> dict:
     cache_key = _ck(f"fmp:enrich:{ticker}")
     cached = get_json(cache_key)
     if cached:
@@ -285,14 +289,43 @@ def _fmp_growth_eps_enrich(ticker: str) -> dict:
         "eps_growth_annual_yoy": 0.0,
         "eps_growth_quarterly_yoy": 0.0,
         "eps_history_5q": [],
+        # new: fill valuation-ish metrics from FMP where possible
+        "pe_trailing": 0.0,
+        "price_to_book": 0.0,
+        "dividend_yield": 0.0,
+        "__km_ok": False,
+        "__inc_ok": False,
     }
 
+    # Key metrics TTM often contains pb / pe / dividend yield fields (TTM) [web:95]
     km = _fmp_get("key-metrics-ttm", {"symbol": ticker})
     if isinstance(km, list) and km and isinstance(km[0], dict):
-        out["debt_to_equity"] = float(km[0].get("debtToEquityRatioTTM") or 0)
+        out["__km_ok"] = True
+        m = km[0]
+
+        out["debt_to_equity"] = _num(
+            _first(m, ["debtToEquityRatioTTM", "debtToEquityTTM", "debtToEquityRatio"], 0.0)
+        )
+
+        out["price_to_book"] = _num(
+            _first(m, ["pbRatioTTM", "priceToBookRatioTTM", "pbRatio"], 0.0)
+        )
+
+        out["pe_trailing"] = _num(
+            _first(m, ["peRatioTTM", "peTTM", "peRatio"], 0.0)
+        )
+
+        # dividendYieldTTM is often fraction; dividendYieldPercentageTTM is already percent [web:95]
+        dy_pct = _num(_first(m, ["dividendYieldPercentageTTM", "dividendYieldPercentage"], 0.0))
+        dy_frac = _num(_first(m, ["dividendYieldTTM", "dividendYield"], 0.0))
+        if dy_pct > 0:
+            out["dividend_yield"] = dy_pct
+        elif dy_frac > 0:
+            out["dividend_yield"] = dy_frac * 100.0
 
     inc = _fmp_get("income-statement", {"symbol": ticker, "period": "quarter", "limit": 8})
     if isinstance(inc, list) and inc:
+        out["__inc_ok"] = True
 
         def dt(x):
             try:
@@ -303,34 +336,39 @@ def _fmp_growth_eps_enrich(ticker: str) -> dict:
         rows = sorted([x for x in inc if isinstance(x, dict)], key=dt, reverse=True)
 
         out["eps_history_5q"] = [
-            {
-                "date": (r.get("date") or "Unknown")[:10],
-                "eps": float((r.get("eps") or r.get("epsDiluted") or 0)),
-            }
+            {"date": (r.get("date") or "Unknown")[:10], "eps": _num(r.get("eps") or r.get("epsDiluted") or 0)}
             for r in rows[:5]
         ]
 
+        # Quarterly YoY (0 vs 4)
         if len(rows) >= 5:
-            rev0 = float(rows[0].get("revenue") or 0)
-            rev4 = float(rows[4].get("revenue") or 0)
+            rev0 = _num(rows[0].get("revenue"))
+            rev4 = _num(rows[4].get("revenue"))
             if rev4:
                 out["revenue_growth_quarterly_yoy"] = ((rev0 - rev4) / rev4) * 100.0
 
-            eps0 = float(rows[0].get("eps") or rows[0].get("epsDiluted") or 0)
-            eps4 = float(rows[4].get("eps") or rows[4].get("epsDiluted") or 0)
+            eps0 = _num(rows[0].get("eps") or rows[0].get("epsDiluted") or 0)
+            eps4 = _num(rows[4].get("eps") or rows[4].get("epsDiluted") or 0)
             if eps4:
                 out["eps_growth_quarterly_yoy"] = ((eps0 - eps4) / abs(eps4)) * 100.0
 
+        # Annual YoY TTM (0..3 vs 4..7)
         if len(rows) >= 8:
-            rev_ttm1 = sum(float(rows[i].get("revenue") or 0) for i in range(0, 4))
-            rev_ttm2 = sum(float(rows[i].get("revenue") or 0) for i in range(4, 8))
+            rev_ttm1 = sum(_num(rows[i].get("revenue")) for i in range(0, 4))
+            rev_ttm2 = sum(_num(rows[i].get("revenue")) for i in range(4, 8))
             if rev_ttm2:
                 out["revenue_growth_annual_yoy"] = ((rev_ttm1 - rev_ttm2) / rev_ttm2) * 100.0
 
-            eps_ttm1 = sum(float(rows[i].get("eps") or rows[i].get("epsDiluted") or 0) for i in range(0, 4))
-            eps_ttm2 = sum(float(rows[i].get("eps") or rows[i].get("epsDiluted") or 0) for i in range(4, 8))
+            eps_ttm1 = sum(_num(rows[i].get("eps") or rows[i].get("epsDiluted") or 0) for i in range(0, 4))
+            eps_ttm2 = sum(_num(rows[i].get("eps") or rows[i].get("epsDiluted") or 0) for i in range(4, 8))
             if eps_ttm2:
                 out["eps_growth_annual_yoy"] = ((eps_ttm1 - eps_ttm2) / abs(eps_ttm2)) * 100.0
+
+        # If PE is still missing, compute trailing PE from EPS TTM (price / EPS_TTM)
+        if out["pe_trailing"] <= 0 and len(rows) >= 4:
+            eps_ttm = sum(_num(rows[i].get("eps") or rows[i].get("epsDiluted") or 0) for i in range(0, 4))
+            if eps_ttm:
+                out["pe_trailing"] = float(price) / float(eps_ttm)
 
     set_json(cache_key, out, ttl_seconds=24 * 3600)
     return out
@@ -349,6 +387,19 @@ def _for_scoring(f: dict) -> dict:
     }
 
 
+def _merge_fill_missing(base: dict, extra: dict) -> dict:
+    out = dict(base)
+    for k, v in (extra or {}).items():
+        if k.startswith("__"):
+            out[k] = v
+            continue
+        cur = out.get(k)
+        missing = (cur is None) or (cur == 0) or (cur == 0.0) or (cur == "") or (cur == [])
+        if missing and v not in (None, "", [], 0, 0.0):
+            out[k] = v
+    return out
+
+
 def get_analysis(ticker: str, debug: bool = False) -> dict | None:
     main_key = _ck(f"analysis:{ticker}")
     cached = get_json(main_key)
@@ -362,6 +413,9 @@ def get_analysis(ticker: str, debug: bool = False) -> dict | None:
         "quote_source": None,
         "chart_source": None,
         "enrich_source": None,
+        "fmp_key_present": bool(FMP_API_KEY),
+        "fmp_km_ok": None,
+        "fmp_inc_ok": None,
     }
 
     # Quote: Yahoo -> FMP
@@ -383,10 +437,12 @@ def get_analysis(ticker: str, debug: bool = False) -> dict | None:
             return last_good
         return None
 
-    # Enrich (optional): FMP cached 24h
+    # Enrich: FMP (if key present)
     if FMP_API_KEY:
-        enrich = _fmp_growth_eps_enrich(ticker)
+        enrich = _fmp_growth_eps_enrich(ticker, price=_num(quote.get("price", 0)))
         debug_info["enrich_source"] = "fmp"
+        debug_info["fmp_km_ok"] = bool(enrich.get("__km_ok"))
+        debug_info["fmp_inc_ok"] = bool(enrich.get("__inc_ok"))
     else:
         enrich = {
             "debt_to_equity": 0.0,
@@ -398,7 +454,7 @@ def get_analysis(ticker: str, debug: bool = False) -> dict | None:
         }
         debug_info["enrich_source"] = "none"
 
-    funds = {**quote, **enrich}
+    funds = _merge_fill_missing(quote, enrich)
 
     # Chart cached separately (6h): Yahoo -> FMP
     chart_key = _ck(f"chart:{ticker}")
@@ -413,49 +469,42 @@ def get_analysis(ticker: str, debug: bool = False) -> dict | None:
                 debug_info["chart_source"] = "fmp"
 
         if not chart:
-            chart = {
-                "candles": [],
-                "global_high": None,
-                "global_low": None,
-                "globalhigh": None,
-                "globallow": None,
-            }
+            chart = {"candles": [], "global_high": None, "global_low": None, "globalhigh": None, "globallow": None}
 
         set_json(chart_key, chart, ttl_seconds=6 * 3600)
 
-    # Score
     score = scorer.evaluate(_for_scoring(funds))
 
-    # Force the fields you were searching for to always exist in the JSON
-    # (both snake_case + legacy names the UI might reference).
-    funds_out = dict(funds)
-    funds_out.setdefault("pe_trailing", 0.0)
-    funds_out.setdefault("pe_forward", 0.0)
-    funds_out.setdefault("debt_to_equity", 0.0)
-    funds_out.setdefault("eps_history_5q", [])
-    funds_out.setdefault("market_cap", 0.0)
-    funds_out.setdefault("price_to_book", 0.0)
+    # Clean internal flags out of fundamentals before returning
+    funds_clean = {k: v for k, v in funds.items() if not str(k).startswith("__")}
 
-    # Legacy compatibility keys
-    funds_out.update(
+    # Ensure fields exist (snake_case + legacy)
+    funds_clean.setdefault("pe_trailing", 0.0)
+    funds_clean.setdefault("pe_forward", 0.0)
+    funds_clean.setdefault("price_to_book", 0.0)
+    funds_clean.setdefault("dividend_yield", 0.0)
+    funds_clean.setdefault("debt_to_equity", 0.0)
+    funds_clean.setdefault("eps_history_5q", [])
+
+    funds_clean.update(
         {
-            "marketcap": funds_out.get("market_cap", 0),
-            "high52w": funds_out.get("high_52w", 0),
-            "low52w": funds_out.get("low_52w", 0),
-            "petrailing": funds_out.get("pe_trailing", 0),
-            "peforward": funds_out.get("pe_forward", 0),
-            "dividendyield": funds_out.get("dividend_yield", 0),
-            "pricetobook": funds_out.get("price_to_book", 0),
-            "debttoequity": funds_out.get("debt_to_equity", 0),
-            "revenuegrowthannualyoy": funds_out.get("revenue_growth_annual_yoy", 0),
-            "revenuegrowthquarterlyyoy": funds_out.get("revenue_growth_quarterly_yoy", 0),
-            "epsgrowthannualyoy": funds_out.get("eps_growth_annual_yoy", 0),
-            "epsgrowthquarterlyyoy": funds_out.get("eps_growth_quarterly_yoy", 0),
-            "epshistory5q": funds_out.get("eps_history_5q", []),
+            "marketcap": funds_clean.get("market_cap", 0),
+            "high52w": funds_clean.get("high_52w", 0),
+            "low52w": funds_clean.get("low_52w", 0),
+            "petrailing": funds_clean.get("pe_trailing", 0),
+            "peforward": funds_clean.get("pe_forward", 0),
+            "dividendyield": funds_clean.get("dividend_yield", 0),
+            "pricetobook": funds_clean.get("price_to_book", 0),
+            "debttoequity": funds_clean.get("debt_to_equity", 0),
+            "revenuegrowthannualyoy": funds_clean.get("revenue_growth_annual_yoy", 0),
+            "revenuegrowthquarterlyyoy": funds_clean.get("revenue_growth_quarterly_yoy", 0),
+            "epsgrowthannualyoy": funds_clean.get("eps_growth_annual_yoy", 0),
+            "epsgrowthquarterlyyoy": funds_clean.get("eps_growth_quarterly_yoy", 0),
+            "epshistory5q": funds_clean.get("eps_history_5q", []),
         }
     )
 
-    out = {"ticker": ticker, "fundamentals": funds_out, "chart": chart, "score": score}
+    out = {"ticker": ticker, "fundamentals": funds_clean, "chart": chart, "score": score}
     if debug:
         out["debug"] = debug_info
 
