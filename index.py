@@ -10,15 +10,19 @@ def health():
     return {"status": "ok"}
 
 @app.get("/api/analyze/{ticker}")
-def analyze(ticker: str):
+def analyze(ticker: str, debug: int = 0):
     ticker = (ticker or "").upper().strip()
     if not ticker.isalnum():
         raise HTTPException(status_code=400, detail="Invalid ticker")
 
-    data = get_analysis(ticker)
+    data = get_analysis(ticker, debug=bool(debug))
     if not data:
-        raise HTTPException(status_code=404, detail=f"Could not find data for {ticker}")
+        # 503 is correct here (upstream blocked/rate-limited)
+        raise HTTPException(
+            status_code=503,
+            detail="Upstream data unavailable (Yahoo/FMP). Try again in 30–60s."
+        )
     return data
 
-# UI (serves /, /app.js, etc. from ./static)
+# UI
 app.mount("/", StaticFiles(directory="static", html=True), name="ui")
