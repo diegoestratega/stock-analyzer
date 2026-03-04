@@ -7,8 +7,7 @@ from typing import Optional, Dict, Any, List, Tuple
 from cache_upstash import get_json, set_json
 from scoring import StockScorer
 
-# Bump this any time you want to invalidate all cached responses instantly
-CACHE_VERSION = "v5"
+CACHE_VERSION = "v6"
 
 FMP_API_KEY = (os.getenv("FMP_API_KEY") or os.getenv("FMPAPIKEY") or "").strip()
 
@@ -71,10 +70,6 @@ def _parse_ymd(s: str) -> Optional[datetime]:
 
 
 def _merge_fill_missing(primary: Dict[str, Any], secondary: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Fill missing/zero-ish values in primary with values from secondary.
-    We treat 0, 0.0, None, "", [] as missing.
-    """
     out = dict(primary or {})
     sec = secondary or {}
     for k, v in sec.items():
@@ -83,6 +78,13 @@ def _merge_fill_missing(primary: Dict[str, Any], secondary: Dict[str, Any]) -> D
         if missing and v not in (None, "", [], 0, 0.0):
             out[k] = v
     return out
+
+
+def _pct_from_frac(v: float) -> float:
+    v = _num(v, 0.0)
+    if v <= 0:
+        return 0.0
+    return v * 100.0 if v < 1 else v
 
 
 # -------------------------
@@ -107,9 +109,7 @@ def _yahoo_quote(ticker: str) -> Optional[Dict[str, Any]]:
         if not price:
             continue
 
-        div_yield = _num(q.get("dividendYield"), 0.0)  # sometimes fraction
-        if div_yield and div_yield < 1:
-            div_yield *= 100.0
+        div_yield = _pct_from_frac(_num(q.get("dividendYield"), 0.0))
 
         return {
             "symbol": ticker,
@@ -181,7 +181,7 @@ def _yahoo_chart_5y_monthly(ticker: str) -> Optional[Dict[str, Any]]:
 
 
 # -------------------------
-# FMP (stable + v3)
+# FMP (Stable + v3)
 # -------------------------
 def _fmp_stable_get(endpoint: str, params: Dict[str, Any]):
     if not FMP_API_KEY:
@@ -227,47 +227,83 @@ def _fmp_quote_stable(ticker: str) -> Optional[Dict[str, Any]]:
     }
 
 
-def _fmp_key_metrics_ttm(ticker: str) -> Dict[str, Any]:
-    """
-    FMP stable key-metrics-ttm is working for you; use it to fill ratios reliably.
-    """
-    out = {"__km_ok": False}
-    km = _fmp_stable_get("key-metrics-ttm", {"symbol": ticker})
-    if isinstance(km, list) and km and isinstance(km[0], dict):
-        out["__km_ok"] = True
-        m = km[0]
+def _fmp_quote_v3(ticker: str) -> Optional[Dict[str, Any]]:
+    # v3 quote endpoint is commonly used as /api/v3/quote/{symbol} [web:105]
+    data = _fmp_v3_get(f"quote/{ticker}", {})
+    if not isinstance(data, list) or not data or not isinstance(data[0], dict):
+        return None
+    q = data[0]
+    price = _num(q.get("price"), 0.0)
+    if not price:
+        return None
 
-        debt_to_equity = _num(m.get("debtToEquityRatioTTM"), 0.0)
+    dy = _num(q.get("dividendYield"), 0.0)
+    dy = _pct_from_frac(dy)
 
-        pb = _num(m.get("pbRatioTTM"), 0.0)
-        if pb <= 0:
-            pb = _num(m.get("priceToBookRatioTTM"), 0.0)
+    return {
+        "symbol": ticker,
+        "price": price,
+        "market_cap": _num(q.get("marketCap"), 0.0),
+        "high_52w": _num(q.get("yearHigh"), 0.0),
+        "low_52w": _num(q.get("yearLow"), 0.0),
+        "pe_trailing": _num(q.get("pe"), 0.0),
+        "pe_forward": _num(q.get("forwardPE"), 0.0),
+        "dividend_yield": dy,
+        "price_to_book": _num(q.get("priceToBook"), 0.0),
+    }
 
-        pe = _num(m.get("peRatioTTM"), 0.0)
-        if pe <= 0:
-            pe = _num(m.get("peTTM"), 0.0)
 
-        dy_pct = _num(m.get("dividendYieldPercentageTTM"), 0.0)
-        dy_frac = _num(m.get("dividendYieldTTM"), 0.0)
-        dy = dy_pct if dy_pct > 0 else (dy_frac * 100.0 if dy_frac > 0 else 0.0)
+def _fmp_ratios_ttm_v3(ticker: str) -> Dict[str, Any]:
+    # Company TTM ratios endpoint: /api/v3/ratios-ttm/{symbol} [web:105]
+    out = {"__ratios_ok": False}
+    data = _fmp_v3_get(f"ratios-ttm/{ticker}", {})
+    if not isinstance(data, list) or not data or not isinstance(data[0], dict):
+        return out
 
-        out.update(
-            {
-                "debt_to_equity": debt_to_equity,
-                "price_to_book": pb,
-                "pe_trailing": pe,
-                "dividend_yield": dy,
-            }
-        )
+    r = data[0]
+    out["__ratios_ok"] = True
 
+    pb = _num(r.get("priceToBookRatioTTM"), 0.0)
+    de = _num(r.get("debtEquityRatioTTM"), 0.0)
+    dy = _pct_from_frac(_num(r.get("dividendYieldTTM"), 0.0))
+    pe = _num(r.get("priceEarningsRatioTTM"), 0.0)
+    if pe <= 0:
+        pe = _num(r.get("peRatioTTM"), 0.0)
+
+    out.update(
+        {
+            "price_to_book": pb,
+            "debt_to_equity": de,
+            "dividend_yield": dy,
+            "pe_trailing": pe,
+        }
+    )
+    return out
+
+
+def _fmp_key_metrics_ttm_v3(ticker: str) -> Dict[str, Any]:
+    # Company TTM key metrics endpoint: /api/v3/key-metrics-ttm/{symbol} [web:105]
+    out = {"__km_v3_ok": False}
+    data = _fmp_v3_get(f"key-metrics-ttm/{ticker}", {"limit": 1})
+    if not isinstance(data, list) or not data or not isinstance(data[0], dict):
+        return out
+
+    m = data[0]
+    out["__km_v3_ok"] = True
+
+    out.update(
+        {
+            "debt_to_equity": _num(m.get("debtToEquityRatioTTM"), 0.0),
+            "price_to_book": _num(m.get("pbRatioTTM") or m.get("priceToBookRatioTTM"), 0.0),
+            "pe_trailing": _num(m.get("peRatioTTM") or m.get("peTTM"), 0.0),
+            "dividend_yield": _pct_from_frac(_num(m.get("dividendYieldTTM") or m.get("dividendYieldPercentageTTM"), 0.0)),
+        }
+    )
     return out
 
 
 def _fmp_income_statement_quarterly_5q(ticker: str) -> Tuple[bool, List[Dict[str, Any]], str]:
-    """
-    Returns: (ok, rows_sorted_desc, source)
-    Tries stable first, then v3. Always limit=5.
-    """
+    # Stable income statement endpoint supports period+limit params [page:0]
     inc = _fmp_stable_get("income-statement", {"symbol": ticker, "period": "quarter", "limit": 5})
     if isinstance(inc, list) and inc and isinstance(inc[0], dict):
         rows = [r for r in inc if isinstance(r, dict)]
@@ -284,9 +320,6 @@ def _fmp_income_statement_quarterly_5q(ticker: str) -> Tuple[bool, List[Dict[str
 
 
 def _fmp_income_statement_annual_2y(ticker: str) -> Tuple[bool, List[Dict[str, Any]], str]:
-    """
-    Annual YoY fallback when we don't have 8 quarters. limit=2.
-    """
     inc = _fmp_stable_get("income-statement", {"symbol": ticker, "period": "annual", "limit": 2})
     if isinstance(inc, list) and inc and isinstance(inc[0], dict):
         rows = [r for r in inc if isinstance(r, dict)]
@@ -302,47 +335,7 @@ def _fmp_income_statement_annual_2y(ticker: str) -> Tuple[bool, List[Dict[str, A
     return False, [], "none"
 
 
-def _fmp_earning_calendar_5q(ticker: str) -> Tuple[bool, List[Dict[str, Any]], str]:
-    """
-    Last-resort EPS history: v3 historical earning calendar (often has epsActual / revenueActual).
-    """
-    ec = _fmp_v3_get(f"historical/earning_calendar/{ticker}", {"limit": 6})
-    if not isinstance(ec, list) or not ec:
-        return False, [], "none"
-
-    rows = []
-    for r in ec:
-        if not isinstance(r, dict):
-            continue
-        dt = _parse_ymd(r.get("date") or "")
-        if not dt:
-            continue
-
-        eps = r.get("eps") if r.get("eps") is not None else r.get("epsActual")
-        if eps is None:
-            eps = r.get("actualEPS")
-        if eps is None:
-            eps = r.get("reportedEPS")
-        if eps is None:
-            eps = 0
-
-        rev = r.get("revenue") if r.get("revenue") is not None else r.get("revenueActual")
-        if rev is None:
-            rev = r.get("actualRevenue")
-        if rev is None:
-            rev = 0
-
-        rows.append({"date": dt, "eps": _num(eps, 0.0), "revenue": _num(rev, 0.0)})
-
-    rows.sort(key=lambda x: x["date"], reverse=True)
-    return (True, rows, "v3-historical-earning-calendar") if rows else (False, [], "none")
-
-
 def _fmp_enrich_5q(ticker: str, price: float) -> Dict[str, Any]:
-    """
-    Enrichment that never asks for >5 quarters.
-    Caches 12h.
-    """
     cache_key = _ck(f"fmp:enrich:{ticker}")
     cached = get_json(cache_key)
     if cached:
@@ -356,28 +349,31 @@ def _fmp_enrich_5q(ticker: str, price: float) -> Dict[str, Any]:
         "eps_growth_quarterly_yoy": 0.0,
         "eps_history_5q": [],
         "pe_trailing": 0.0,
+        "pe_forward": 0.0,
         "price_to_book": 0.0,
         "dividend_yield": 0.0,
-        "__km_ok": False,
         "__q_ok": False,
         "__q_src": "none",
         "__a_ok": False,
         "__a_src": "none",
-        "__ec_ok": False,
-        "__ec_src": "none",
+        "__ratios_ok": False,
+        "__km_v3_ok": False,
     }
 
-    # 1) Ratios/TTM-ish from key metrics TTM
-    km = _fmp_key_metrics_ttm(ticker)
-    out = _merge_fill_missing(out, km)
+    # 1) Ratios-ttm + key-metrics-ttm (v3) to fill PB/DY/DE/PE [web:105]
+    ratios = _fmp_ratios_ttm_v3(ticker)
+    kmv3 = _fmp_key_metrics_ttm_v3(ticker)
+    out = _merge_fill_missing(out, ratios)
+    out = _merge_fill_missing(out, kmv3)
+    out["__ratios_ok"] = bool(ratios.get("__ratios_ok"))
+    out["__km_v3_ok"] = bool(kmv3.get("__km_v3_ok"))
 
-    # 2) Quarterly 5q from income statement (stable -> v3), else earnings calendar
+    # 2) Quarterly EPS (limit=5)
     ok_q, rows_q, q_src = _fmp_income_statement_quarterly_5q(ticker)
     out["__q_ok"] = bool(ok_q)
     out["__q_src"] = q_src
 
     if ok_q and rows_q:
-        # EPS history
         eps_hist = []
         for r in rows_q[:5]:
             eps_val = r.get("eps")
@@ -386,7 +382,6 @@ def _fmp_enrich_5q(ticker: str, price: float) -> Dict[str, Any]:
             eps_hist.append({"date": (r.get("date") or "Unknown")[:10], "eps": _num(eps_val, 0.0)})
         out["eps_history_5q"] = eps_hist
 
-        # Quarterly YoY (needs 5 quarters)
         if len(rows_q) >= 5:
             rev0 = _num(rows_q[0].get("revenue"), 0.0)
             rev4 = _num(rows_q[4].get("revenue"), 0.0)
@@ -398,37 +393,13 @@ def _fmp_enrich_5q(ticker: str, price: float) -> Dict[str, Any]:
             if eps4:
                 out["eps_growth_quarterly_yoy"] = ((eps0 - eps4) / abs(eps4)) * 100.0
 
-        # Trailing PE fallback from EPS TTM (last 4 quarters)
+        # trailing PE from EPS TTM if still missing
         if out.get("pe_trailing", 0.0) <= 0 and len(rows_q) >= 4:
             eps_ttm = sum(_num(rows_q[i].get("eps") or rows_q[i].get("epsDiluted") or 0, 0.0) for i in range(0, 4))
             if eps_ttm:
                 out["pe_trailing"] = float(price) / float(eps_ttm)
 
-    else:
-        ok_ec, rows_ec, ec_src = _fmp_earning_calendar_5q(ticker)
-        out["__ec_ok"] = bool(ok_ec)
-        out["__ec_src"] = ec_src
-        if ok_ec and rows_ec:
-            out["eps_history_5q"] = [
-                {"date": rows_ec[i]["date"].strftime("%Y-%m-%d"), "eps": _num(rows_ec[i]["eps"], 0.0)}
-                for i in range(min(5, len(rows_ec)))
-            ]
-
-            if len(rows_ec) >= 5:
-                eps0, eps4 = _num(rows_ec[0]["eps"], 0.0), _num(rows_ec[4]["eps"], 0.0)
-                if eps4:
-                    out["eps_growth_quarterly_yoy"] = ((eps0 - eps4) / abs(eps4)) * 100.0
-
-                rev0, rev4 = _num(rows_ec[0]["revenue"], 0.0), _num(rows_ec[4]["revenue"], 0.0)
-                if rev4:
-                    out["revenue_growth_quarterly_yoy"] = ((rev0 - rev4) / rev4) * 100.0
-
-            if out.get("pe_trailing", 0.0) <= 0 and len(rows_ec) >= 4:
-                eps_ttm = sum(_num(rows_ec[i]["eps"], 0.0) for i in range(0, 4))
-                if eps_ttm:
-                    out["pe_trailing"] = float(price) / float(eps_ttm)
-
-    # 3) Annual YoY from annual income statement (limit=2)
+    # 3) Annual YoY (limit=2)
     ok_a, rows_a, a_src = _fmp_income_statement_annual_2y(ticker)
     out["__a_ok"] = bool(ok_a)
     out["__a_src"] = a_src
@@ -448,7 +419,7 @@ def _fmp_enrich_5q(ticker: str, price: float) -> Dict[str, Any]:
 
 
 # -------------------------
-# Chart fallback (FMP)
+# FMP chart fallback
 # -------------------------
 def _fmp_chart_5y_monthly(ticker: str) -> Optional[Dict[str, Any]]:
     raw = _fmp_stable_get("historical-price-eod/light", {"symbol": ticker})
@@ -545,35 +516,38 @@ def get_analysis(ticker: str, debug: bool = False) -> Optional[Dict[str, Any]]:
         "quote_source": None,
         "yahoo_quote_ok": None,
         "fmp_quote_ok": None,
+        "fmp_quote_v3_ok": None,
         "enrich_source": None,
-        "fmp_km_ok": None,
         "fmp_q_ok": None,
         "fmp_q_src": None,
         "fmp_a_ok": None,
         "fmp_a_src": None,
-        "fmp_ec_ok": None,
-        "fmp_ec_src": None,
+        "fmp_ratios_ok": None,
+        "fmp_km_v3_ok": None,
         "chart_source": None,
     }
 
-    # Quote: FMP first, then Yahoo fill
+    # Quote: FMP Stable first, merge in FMP v3 quote, then Yahoo fill
     fmp_q = _fmp_quote_stable(ticker) if FMP_API_KEY else None
+    fmp_q_v3 = _fmp_quote_v3(ticker) if FMP_API_KEY else None
     yahoo_q = _yahoo_quote(ticker)
 
     debug_info["fmp_quote_ok"] = bool(fmp_q)
+    debug_info["fmp_quote_v3_ok"] = bool(fmp_q_v3)
     debug_info["yahoo_quote_ok"] = bool(yahoo_q)
 
     if fmp_q:
         quote = dict(fmp_q)
         debug_info["quote_source"] = "fmp"
+        if fmp_q_v3:
+            quote = _merge_fill_missing(quote, fmp_q_v3)
         if yahoo_q:
             quote = _merge_fill_missing(quote, yahoo_q)
     elif yahoo_q:
         quote = dict(yahoo_q)
         debug_info["quote_source"] = "yahoo"
     else:
-        lastgood_key = _ck(f"analysis:lastgood:{ticker}")
-        last_good = get_json(lastgood_key)
+        last_good = get_json(_ck(f"analysis:lastgood:{ticker}"))
         if last_good:
             last_good["stale"] = True
             if debug:
@@ -581,22 +555,19 @@ def get_analysis(ticker: str, debug: bool = False) -> Optional[Dict[str, Any]]:
             return last_good
         return None
 
-    # Enrich: FMP 5q only, then fill any remaining gaps from Yahoo quote
     enrich = _fmp_enrich_5q(ticker, price=_num(quote.get("price", 0.0))) if FMP_API_KEY else {}
     debug_info["enrich_source"] = "fmp" if FMP_API_KEY else "none"
-    debug_info["fmp_km_ok"] = bool(enrich.get("__km_ok"))
     debug_info["fmp_q_ok"] = bool(enrich.get("__q_ok"))
     debug_info["fmp_q_src"] = enrich.get("__q_src")
     debug_info["fmp_a_ok"] = bool(enrich.get("__a_ok"))
     debug_info["fmp_a_src"] = enrich.get("__a_src")
-    debug_info["fmp_ec_ok"] = bool(enrich.get("__ec_ok"))
-    debug_info["fmp_ec_src"] = enrich.get("__ec_src")
+    debug_info["fmp_ratios_ok"] = bool(enrich.get("__ratios_ok"))
+    debug_info["fmp_km_v3_ok"] = bool(enrich.get("__km_v3_ok"))
 
     funds = _merge_fill_missing(quote, {k: v for k, v in enrich.items() if not str(k).startswith("__")})
     if yahoo_q:
         funds = _merge_fill_missing(funds, yahoo_q)
 
-    # Chart: Yahoo first (looks best), fallback to FMP; cache 6h
     chart_key = _ck(f"chart:{ticker}")
     chart = get_json(chart_key)
     if chart:
@@ -612,10 +583,9 @@ def get_analysis(ticker: str, debug: bool = False) -> Optional[Dict[str, Any]]:
             else:
                 chart = {"candles": [], "global_high": None, "global_low": None, "globalhigh": None, "globallow": None}
                 debug_info["chart_source"] = "none"
-
         set_json(chart_key, chart, ttl_seconds=6 * 3600)
 
-    # Ensure fields always exist
+    # Ensure fields exist
     funds.setdefault("pe_trailing", 0.0)
     funds.setdefault("pe_forward", 0.0)
     funds.setdefault("price_to_book", 0.0)
@@ -629,7 +599,7 @@ def get_analysis(ticker: str, debug: bool = False) -> Optional[Dict[str, Any]]:
 
     score = scorer.evaluate(_for_scoring(funds))
 
-    # Legacy compatibility keys (for any older frontend paths)
+    # Legacy keys
     funds_compat = dict(funds)
     funds_compat.update(
         {
