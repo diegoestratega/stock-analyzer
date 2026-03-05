@@ -7,7 +7,7 @@ from typing import Optional, Dict, Any, List, Tuple
 from cache_upstash import get_json, set_json
 from scoring import StockScorer
 
-CACHE_VERSION = "v7"
+CACHE_VERSION = "v8"  # bump to bust cache
 
 FMP_API_KEY = (os.getenv("FMP_API_KEY") or os.getenv("FMPAPIKEY") or "").strip()
 
@@ -88,13 +88,9 @@ def _merge_fill_missing(primary: Dict[str, Any], secondary: Dict[str, Any]) -> D
 
 
 # -------------------------
-# Yahoo: quote via chart meta (reliable for you)
+# Yahoo meta quote (via chart meta)
 # -------------------------
 def _yahoo_meta_quote(ticker: str) -> Optional[Dict[str, Any]]:
-    """
-    Uses Yahoo v8 chart meta instead of the quote endpoint.
-    This often works even when /v7/finance/quote fails.
-    """
     cache_key = _ck(f"yahoo:meta:{ticker}")
     cached = get_json(cache_key)
     if cached:
@@ -113,11 +109,7 @@ def _yahoo_meta_quote(ticker: str) -> Optional[Dict[str, Any]]:
     if not isinstance(meta, dict) or not meta:
         return None
 
-    # Some keys vary; we keep what we can.
     price = _num(meta.get("regularMarketPrice") or meta.get("chartPreviousClose") or 0, 0.0)
-    if not price:
-        # Still allow, but most fields depend on having price
-        price = 0.0
 
     out = {
         "symbol": ticker,
@@ -211,7 +203,6 @@ def _fmp_quote_stable(ticker: str) -> Optional[Dict[str, Any]]:
     if not price:
         return None
 
-    # lastDiv is usually the latest payment amount; annualize by *4 as a reasonable default for US quarterly payers
     last_div = _num(q.get("lastDiv"), 0.0)
     dividend_yield = ((last_div * 4.0) / price) * 100.0 if (price and last_div) else 0.0
 
@@ -247,13 +238,6 @@ def _fmp_income_statement_annual_2y(ticker: str) -> Tuple[bool, List[Dict[str, A
 
 
 def _fmp_balance_sheet_annual_1(ticker: str) -> Tuple[bool, Dict[str, Any]]:
-    """
-    Try to compute:
-    - debt_to_equity = totalDebt / totalStockholdersEquity
-    - price_to_book ≈ market_cap / totalStockholdersEquity (if market cap present)
-    This endpoint name is commonly 'balance-sheet-statement' in FMP APIs; if your plan blocks it,
-    it will just fail gracefully and keep zeros.
-    """
     bs = _fmp_stable_get("balance-sheet-statement", {"symbol": ticker, "period": "annual", "limit": 1})
     if not (isinstance(bs, list) and bs and isinstance(bs[0], dict)):
         return False, {}
@@ -265,14 +249,26 @@ def _fmp_balance_sheet_annual_1(ticker: str) -> Tuple[bool, Dict[str, Any]]:
     if total_debt <= 0:
         total_debt = _num(r.get("shortTermDebt"), 0.0) + _num(r.get("longTermDebt"), 0.0)
 
-    out = {"__bs_ok": True}
+    out = {"__bs_ok": True, "__equity": equity, "__total_debt": total_debt}
 
-    if equity > 0:
-        out["debt_to_equity"] = (total_debt / equity) if total_debt > 0 else 0.0
-        out["__equity"] = equity
-        out["__total_debt"] = total_debt
+    if equity > 0 and total_debt > 0:
+        out["debt_to_equity"] = total_debt / equity
 
     return True, out
+
+
+def _compute_pe_from_eps_ttm(price: float, eps_history_5q: List[Dict[str, Any]]) -> float:
+    if not price or not eps_history_5q:
+        return 0.0
+    eps_vals = []
+    for r in eps_history_5q[:4]:
+        eps_vals.append(_num(r.get("eps"), 0.0))
+    if len(eps_vals) < 4:
+        return 0.0
+    eps_ttm = sum(eps_vals)
+    if eps_ttm == 0:
+        return 0.0
+    return float(price) / float(eps_ttm)
 
 
 def _fmp_enrich_5q(ticker: str, price: float) -> Dict[str, Any]:
@@ -282,7 +278,6 @@ def _fmp_enrich_5q(ticker: str, price: float) -> Dict[str, Any]:
         return cached
 
     out = {
-        "debt_to_equity": 0.0,
         "revenue_growth_annual_yoy": 0.0,
         "revenue_growth_quarterly_yoy": 0.0,
         "eps_growth_annual_yoy": 0.0,
@@ -296,10 +291,13 @@ def _fmp_enrich_5q(ticker: str, price: float) -> Dict[str, Any]:
     out["__q_ok"] = bool(ok_q)
 
     if ok_q and rows_q:
-        out["eps_history_5q"] = [
-            {"date": (r.get("date") or "Unknown")[:10], "eps": _num(r.get("eps") or r.get("epsDiluted") or 0, 0.0)}
-            for r in rows_q[:5]
-        ]
+        eps_hist = []
+        for r in rows_q[:5]:
+            eps_val = r.get("eps")
+            if eps_val is None:
+                eps_val = r.get("epsDiluted", 0)
+            eps_hist.append({"date": (r.get("date") or "Unknown")[:10], "eps": _num(eps_val, 0.0)})
+        out["eps_history_5q"] = eps_hist
 
         if len(rows_q) >= 5:
             rev0 = _num(rows_q[0].get("revenue"), 0.0)
@@ -360,6 +358,7 @@ def get_analysis(ticker: str, debug: bool = False) -> Optional[Dict[str, Any]]:
         "fmp_q_ok": None,
         "fmp_a_ok": None,
         "fmp_bs_ok": None,
+        "pe_from_eps_ttm_used": False,
         "chart_source": None,
     }
 
@@ -393,33 +392,37 @@ def get_analysis(ticker: str, debug: bool = False) -> Optional[Dict[str, Any]]:
 
     funds = _merge_fill_missing(quote, {k: v for k, v in enrich.items() if not str(k).startswith("__")})
 
-    # Compute Debt/Equity + PB from FMP balance sheet if available
+    # Balance-sheet derived DE + PB
+    bs_calc = {}
     if FMP_API_KEY:
         bs_ok, bs_calc = _fmp_balance_sheet_annual_1(ticker)
         debug_info["fmp_bs_ok"] = bool(bs_ok)
-        if bs_calc:
-            funds = _merge_fill_missing(funds, bs_calc)
+        funds = _merge_fill_missing(funds, bs_calc)
 
-            # If we have equity and market cap, compute price_to_book ≈ market_cap / equity
-            equity = _num(bs_calc.get("__equity"), 0.0)
-            mcap = _num(funds.get("market_cap"), 0.0)
-            if equity > 0 and mcap > 0 and _num(funds.get("price_to_book"), 0.0) <= 0:
-                funds["price_to_book"] = mcap / equity
+        equity = _num(bs_calc.get("__equity"), 0.0)
+        mcap = _num(funds.get("market_cap"), 0.0)
+        if equity > 0 and mcap > 0 and _num(funds.get("price_to_book"), 0.0) <= 0:
+            funds["price_to_book"] = mcap / equity
     else:
         debug_info["fmp_bs_ok"] = False
 
-    # Chart (cached 6h)
+    # Compute trailing PE from EPS TTM if still missing
+    if _num(funds.get("pe_trailing"), 0.0) <= 0:
+        pe_calc = _compute_pe_from_eps_ttm(_num(funds.get("price"), 0.0), funds.get("eps_history_5q") or [])
+        if pe_calc > 0:
+            funds["pe_trailing"] = pe_calc
+            debug_info["pe_from_eps_ttm_used"] = True
+
+    # Chart cache 6h
     chart_key = _ck(f"chart:{ticker}")
     chart = get_json(chart_key)
     if chart:
         debug_info["chart_source"] = "cache"
     else:
         chart = _yahoo_chart_5y_monthly(ticker)
-        if chart:
-            debug_info["chart_source"] = "yahoo"
-        else:
+        debug_info["chart_source"] = "yahoo" if chart else "none"
+        if not chart:
             chart = {"candles": [], "global_high": None, "global_low": None, "globalhigh": None, "globallow": None}
-            debug_info["chart_source"] = "none"
         set_json(chart_key, chart, ttl_seconds=6 * 3600)
 
     # Ensure fields exist
@@ -436,28 +439,34 @@ def get_analysis(ticker: str, debug: bool = False) -> Optional[Dict[str, Any]]:
 
     score = scorer.evaluate(_for_scoring(funds))
 
-    # Legacy compatibility keys
-    funds_compat = dict(funds)
-    funds_compat.update(
+    # Strip internal __* fields from fundamentals output
+    fundamentals_clean = {k: v for k, v in funds.items() if not str(k).startswith("__")}
+
+    # Legacy compatibility keys for frontend
+    fundamentals_clean.update(
         {
-            "marketcap": funds.get("market_cap", 0),
-            "high52w": funds.get("high_52w", 0),
-            "low52w": funds.get("low_52w", 0),
-            "petrailing": funds.get("pe_trailing", 0),
-            "peforward": funds.get("pe_forward", 0),
-            "dividendyield": funds.get("dividend_yield", 0),
-            "pricetobook": funds.get("price_to_book", 0),
-            "debttoequity": funds.get("debt_to_equity", 0),
-            "revenuegrowthannualyoy": funds.get("revenue_growth_annual_yoy", 0),
-            "revenuegrowthquarterlyyoy": funds.get("revenue_growth_quarterly_yoy", 0),
-            "epsgrowthannualyoy": funds.get("eps_growth_annual_yoy", 0),
-            "epsgrowthquarterlyyoy": funds.get("eps_growth_quarterly_yoy", 0),
-            "epshistory5q": funds.get("eps_history_5q", []),
+            "marketcap": fundamentals_clean.get("market_cap", 0),
+            "high52w": fundamentals_clean.get("high_52w", 0),
+            "low52w": fundamentals_clean.get("low_52w", 0),
+            "petrailing": fundamentals_clean.get("pe_trailing", 0),
+            "peforward": fundamentals_clean.get("pe_forward", 0),
+            "dividendyield": fundamentals_clean.get("dividend_yield", 0),
+            "pricetobook": fundamentals_clean.get("price_to_book", 0),
+            "debttoequity": fundamentals_clean.get("debt_to_equity", 0),
+            "revenuegrowthannualyoy": fundamentals_clean.get("revenue_growth_annual_yoy", 0),
+            "revenuegrowthquarterlyyoy": fundamentals_clean.get("revenue_growth_quarterly_yoy", 0),
+            "epsgrowthannualyoy": fundamentals_clean.get("eps_growth_annual_yoy", 0),
+            "epsgrowthquarterlyyoy": fundamentals_clean.get("eps_growth_quarterly_yoy", 0),
+            "epshistory5q": fundamentals_clean.get("eps_history_5q", []),
         }
     )
 
-    out = {"ticker": ticker, "fundamentals": funds_compat, "chart": chart, "score": score}
+    out = {"ticker": ticker, "fundamentals": fundamentals_clean, "chart": chart, "score": score}
+
     if debug:
+        # Put BS internals in debug only (useful for validation)
+        debug_info["bs_equity"] = bs_calc.get("__equity") if isinstance(bs_calc, dict) else None
+        debug_info["bs_total_debt"] = bs_calc.get("__total_debt") if isinstance(bs_calc, dict) else None
         out["debug"] = debug_info
 
     set_json(main_key, out, ttl_seconds=5 * 60)
