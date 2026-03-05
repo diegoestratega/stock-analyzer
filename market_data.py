@@ -8,7 +8,7 @@ from typing import Optional, Dict, Any, List, Tuple
 from cache_upstash import get_json, set_json
 from scoring import StockScorer
 
-CACHE_VERSION = "v12"
+CACHE_VERSION = "v13"
 
 FMP_API_KEY = (os.getenv("FMP_API_KEY") or os.getenv("FMPAPIKEY") or "").strip()
 
@@ -17,6 +17,8 @@ UA = (
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/122.0.0.0 Safari/537.36"
 )
+
+LOG_UPSTREAM = (os.getenv("LOG_UPSTREAM") or "0").strip() == "1"
 
 sess = requests.Session()
 sess.headers.update(
@@ -77,14 +79,37 @@ def _safe_get_json(url: str, params=None, timeout=18) -> Optional[Any]:
     for attempt in range(4):
         try:
             r = sess.get(url, params=params, timeout=timeout, allow_redirects=True)
+
+            if LOG_UPSTREAM:
+                print("HTTP", r.status_code, r.request.method, r.url)
+
             if r.status_code == 200:
-                return r.json()
+                try:
+                    return r.json()
+                except Exception as e:
+                    print("JSON_ERR", type(e).__name__, url)
+                    try:
+                        print("BODY200", (r.text or "")[:200])
+                    except Exception:
+                        pass
+                    return None
+
+            # Always log non-200 once (even if LOG_UPSTREAM is off)
+            print("HTTP_ERR", r.status_code, r.request.method, r.url)
+            try:
+                print("BODY", (r.text or "")[:200])
+            except Exception:
+                pass
+
             if r.status_code in (429, 500, 502, 503, 504):
                 _sleep_jitter(attempt)
                 continue
+
             return None
-        except Exception:
+        except Exception as e:
+            print("REQ_ERR", type(e).__name__, url)
             _sleep_jitter(attempt)
+
     return None
 
 
@@ -103,14 +128,8 @@ def _yahoo_restore_cached_cookies():
 
 
 def _yahoo_get_crumb(force_refresh: bool = False) -> Optional[str]:
-    """
-    Best-effort cookie+crumb bootstrap:
-    - Restore cookies from Upstash (if any)
-    - Hit finance.yahoo.com (sets/refreshes cookies)
-    - Call query1 ... /v1/test/getcrumb
-    - Cache cookies+crumb for reuse across serverless invocations
-    """
     cache_key = _ck("yahoo:crumbpack")
+
     if not force_refresh:
         pack = get_json(cache_key)
         if isinstance(pack, dict) and pack.get("crumb") and isinstance(pack.get("cookies"), dict):
@@ -123,13 +142,15 @@ def _yahoo_get_crumb(force_refresh: bool = False) -> Optional[str]:
     _yahoo_restore_cached_cookies()
 
     try:
-        # Any quote page tends to set the needed cookies if they are obtainable.
         sess.get("https://finance.yahoo.com/quote/AAPL", timeout=12, allow_redirects=True)
+        sess.get("https://finance.yahoo.com/quote/AAPL/", timeout=12, allow_redirects=True)
     except Exception:
         pass
 
     try:
         r = sess.get("https://query1.finance.yahoo.com/v1/test/getcrumb", timeout=12, allow_redirects=True)
+        if LOG_UPSTREAM:
+            print("HTTP", r.status_code, r.request.method, r.url)
         if r.status_code == 200:
             crumb = (r.text or "").strip()
             if crumb:
@@ -146,10 +167,6 @@ def _yahoo_get_crumb(force_refresh: bool = False) -> Optional[str]:
 # Yahoo: /v7 quote (attempt with crumb)
 # -------------------------
 def _yahoo_quote_v7(ticker: str) -> Optional[Dict[str, Any]]:
-    """
-    Try to use /v7/finance/quote with crumb+cookies.
-    Falls back to a no-crumb attempt if crumb cannot be fetched.
-    """
     base = "https://query1.finance.yahoo.com/v7/finance/quote"
 
     crumb = _yahoo_get_crumb(force_refresh=False)
@@ -159,13 +176,13 @@ def _yahoo_quote_v7(ticker: str) -> Optional[Dict[str, Any]]:
 
     data = _safe_get_json(base, params=params, timeout=18)
 
-    # If unauthorized-ish, force refresh crumb once
+    # One forced refresh attempt if we had a crumb and still got nothing
     if not data and crumb:
         crumb2 = _yahoo_get_crumb(force_refresh=True)
         if crumb2:
             data = _safe_get_json(base, params={"symbols": ticker, "crumb": crumb2}, timeout=18)
 
-    # If still nothing and we had no crumb, try plain once
+    # If we never got a crumb, try plain once
     if not data and not crumb:
         data = _safe_get_json(base, params={"symbols": ticker}, timeout=18)
 
@@ -199,7 +216,7 @@ def _yahoo_quote_v7(ticker: str) -> Optional[Dict[str, Any]]:
 
 
 # -------------------------
-# Yahoo: QuoteSummary (yfinance-like)
+# Yahoo: QuoteSummary (yfinance-like fields)
 # -------------------------
 def _dig_raw(obj: Any) -> float:
     if obj is None:
@@ -217,14 +234,7 @@ def _yahoo_quote_summary(ticker: str) -> Optional[Dict[str, Any]]:
     if cached:
         return cached
 
-    modules = ",".join(
-        [
-            "price",
-            "summaryDetail",
-            "defaultKeyStatistics",
-            "financialData",
-        ]
-    )
+    modules = ",".join(["price", "summaryDetail", "defaultKeyStatistics", "financialData"])
     url = f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{ticker}"
     data = _safe_get_json(url, params={"modules": modules}, timeout=18)
     if not data:
@@ -347,6 +357,78 @@ def _yahoo_dividend_yield_from_events(ticker: str, price: float) -> Tuple[float,
     return total, yld
 
 
+def _yahoo_eps_history_5q_from_qs(ticker: str) -> List[Dict[str, Any]]:
+    cache_key = _ck(f"yahoo:eps5:{ticker}")
+    cached = get_json(cache_key)
+    if cached and isinstance(cached, list):
+        return cached
+
+    url = f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{ticker}"
+    data = _safe_get_json(url, params={"modules": "earningsHistory"}, timeout=18)
+    if not data:
+        return []
+
+    res = (((data.get("quoteSummary") or {}).get("result")) or [])
+    if not res:
+        return []
+
+    eh = (res[0] or {}).get("earningsHistory") or {}
+    hist = eh.get("history") or []
+    if not isinstance(hist, list) or not hist:
+        return []
+
+    rows: List[Dict[str, Any]] = []
+    for r in hist:
+        if not isinstance(r, dict):
+            continue
+        qtr = r.get("quarter") or {}
+        ts = _dig_raw(qtr.get("raw")) if isinstance(qtr, dict) else 0
+        d = datetime.utcfromtimestamp(int(ts)).strftime("%Y-%m-%d") if ts else "Unknown"
+        eps = _dig_raw(r.get("epsActual")) or _dig_raw(r.get("epsEstimate"))
+        if eps == 0:
+            continue
+        rows.append({"date": d, "eps": float(eps)})
+
+    rows = rows[:5]
+    set_json(cache_key, rows, ttl_seconds=6 * 3600)
+    return rows
+
+
+def _yahoo_income_stmt_qtr_5_from_qs(ticker: str) -> List[Dict[str, Any]]:
+    cache_key = _ck(f"yahoo:isq5:{ticker}")
+    cached = get_json(cache_key)
+    if cached and isinstance(cached, list):
+        return cached
+
+    url = f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{ticker}"
+    data = _safe_get_json(url, params={"modules": "incomeStatementHistoryQuarterly"}, timeout=18)
+    if not data:
+        return []
+
+    res = (((data.get("quoteSummary") or {}).get("result")) or [])
+    if not res:
+        return []
+
+    ishq = (res[0] or {}).get("incomeStatementHistoryQuarterly") or {}
+    stmts = ishq.get("incomeStatementHistory") or []
+    if not isinstance(stmts, list) or not stmts:
+        return []
+
+    rows: List[Dict[str, Any]] = []
+    for s in stmts:
+        if not isinstance(s, dict):
+            continue
+        end = s.get("endDate") or {}
+        ts = _dig_raw(end.get("raw")) if isinstance(end, dict) else 0
+        d = datetime.utcfromtimestamp(int(ts)).strftime("%Y-%m-%d") if ts else "Unknown"
+        rev = _dig_raw(s.get("totalRevenue"))
+        rows.append({"date": d, "revenue": float(rev) if rev else 0.0})
+
+    rows = rows[:5]
+    set_json(cache_key, rows, ttl_seconds=6 * 3600)
+    return rows
+
+
 def _yahoo_chart_5y_monthly(ticker: str) -> Optional[Dict[str, Any]]:
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
     data = _safe_get_json(url, params={"range": "5y", "interval": "1mo"})
@@ -369,7 +451,7 @@ def _yahoo_chart_5y_monthly(ticker: str) -> Optional[Dict[str, Any]]:
     lows = q0.get("low") or []
     closes = q0.get("close") or []
 
-    candles = []
+    candles: List[Dict[str, Any]] = []
     global_high = None
     global_low = None
 
@@ -484,10 +566,7 @@ def _fmp_forward_pe_from_analyst_estimates(ticker: str, price: float) -> float:
     if cached and isinstance(cached, dict):
         return _num(cached.get("pe_forward", 0.0))
 
-    data = _fmp_stable_get(
-        "analyst-estimates",
-        {"symbol": ticker, "period": "annual", "page": 0, "limit": 6},
-    )
+    data = _fmp_stable_get("analyst-estimates", {"symbol": ticker, "period": "annual", "page": 0, "limit": 6})
     if not isinstance(data, list) or not data:
         return 0.0
 
@@ -498,7 +577,6 @@ def _fmp_forward_pe_from_analyst_estimates(ticker: str, price: float) -> float:
     for r in data:
         if not isinstance(r, dict):
             continue
-
         y = r.get("date") or r.get("year")
         yr = None
         if isinstance(y, int):
@@ -514,8 +592,7 @@ def _fmp_forward_pe_from_analyst_estimates(ticker: str, price: float) -> float:
             or r.get("estimatedEPSAvg")
             or r.get("epsEstimatedAverage")
             or r.get("epsAvg")
-            or 0.0,
-            0.0,
+            or 0.0
         )
         if eps <= 0:
             continue
@@ -551,7 +628,7 @@ def _enrich_growth_eps(ticker: str) -> Dict[str, Any]:
     if cached:
         return cached
 
-    out = {
+    out: Dict[str, Any] = {
         "revenue_growth_annual_yoy": 0.0,
         "revenue_growth_quarterly_yoy": 0.0,
         "eps_growth_annual_yoy": 0.0,
@@ -559,6 +636,8 @@ def _enrich_growth_eps(ticker: str) -> Dict[str, Any]:
         "eps_history_5q": [],
         "__fmp_q_ok": False,
         "__fmp_a_ok": False,
+        "__y_eps_ok": False,
+        "__y_rev_ok": False,
     }
 
     ok_q, rows_q = _fmp_income_statement_quarterly_5q(ticker)
@@ -596,6 +675,27 @@ def _enrich_growth_eps(ticker: str) -> Dict[str, Any]:
         eps_prev = _num(rows_a[1].get("eps") or rows_a[1].get("epsDiluted") or 0, 0.0)
         if eps_prev:
             out["eps_growth_annual_yoy"] = ((eps_now - eps_prev) / abs(eps_prev)) * 100.0
+
+    # Yahoo fallbacks for EPS/revenue series
+    if not out["eps_history_5q"]:
+        y_eps = _yahoo_eps_history_5q_from_qs(ticker)
+        if y_eps:
+            out["eps_history_5q"] = y_eps[:5]
+            out["__y_eps_ok"] = True
+            if len(y_eps) >= 5:
+                eps0 = _num(y_eps[0].get("eps"), 0.0)
+                eps4 = _num(y_eps[4].get("eps"), 0.0)
+                if eps4:
+                    out["eps_growth_quarterly_yoy"] = ((eps0 - eps4) / abs(eps4)) * 100.0
+
+    if _num(out.get("revenue_growth_quarterly_yoy"), 0.0) == 0.0:
+        y_isq = _yahoo_income_stmt_qtr_5_from_qs(ticker)
+        if y_isq and len(y_isq) >= 5:
+            rev0 = _num(y_isq[0].get("revenue"), 0.0)
+            rev4 = _num(y_isq[4].get("revenue"), 0.0)
+            if rev4:
+                out["revenue_growth_quarterly_yoy"] = ((rev0 - rev4) / rev4) * 100.0
+                out["__y_rev_ok"] = True
 
     set_json(cache_key, out, ttl_seconds=12 * 3600)
     return out
@@ -635,13 +735,15 @@ def get_analysis(ticker: str, debug: bool = False) -> Optional[Dict[str, Any]]:
         "fmp_bs_ok": False,
         "enrich_fmp_q_ok": False,
         "enrich_fmp_a_ok": False,
+        "enrich_y_eps_ok": False,
+        "enrich_y_rev_ok": False,
         "dividend_yield_source": "none",
         "pe_trailing_source": "none",
         "pe_forward_source": "none",
         "chart_source": None,
     }
 
-    # Try Yahoo v7 first (your request), then Yahoo QuoteSummary, then meta, then FMP.
+    # Quote priority: Yahoo v7 -> Yahoo QuoteSummary -> Yahoo Meta -> FMP
     y7 = _yahoo_quote_v7(ticker)
     qs = _yahoo_quote_summary(ticker)
     meta = _yahoo_meta_quote(ticker)
@@ -690,21 +792,28 @@ def get_analysis(ticker: str, debug: bool = False) -> Optional[Dict[str, Any]]:
         "eps_history_5q": [],
         "__fmp_q_ok": False,
         "__fmp_a_ok": False,
+        "__y_eps_ok": False,
+        "__y_rev_ok": False,
     }
     debug_info["enrich_fmp_q_ok"] = bool(enrich.get("__fmp_q_ok"))
     debug_info["enrich_fmp_a_ok"] = bool(enrich.get("__fmp_a_ok"))
+    debug_info["enrich_y_eps_ok"] = bool(enrich.get("__y_eps_ok"))
+    debug_info["enrich_y_rev_ok"] = bool(enrich.get("__y_rev_ok"))
 
     funds = _merge_fill_missing(quote, {k: v for k, v in enrich.items() if not str(k).startswith("__")})
 
+    # Balance sheet => D/E + compute P/B if missing
     if FMP_API_KEY:
         bs_ok, bs_calc = _fmp_balance_sheet_annual_1(ticker)
         debug_info["fmp_bs_ok"] = bool(bs_ok)
         funds = _merge_fill_missing(funds, bs_calc)
+
         equity = _num(bs_calc.get("__equity"), 0.0)
         mcap = _num(funds.get("market_cap"), 0.0)
         if equity > 0 and mcap > 0 and _num(funds.get("price_to_book"), 0.0) <= 0:
             funds["price_to_book"] = mcap / equity
 
+    # Trailing PE: upstream else EPS TTM
     if _num(funds.get("pe_trailing"), 0.0) > 0:
         debug_info["pe_trailing_source"] = "upstream"
     else:
@@ -713,6 +822,7 @@ def get_analysis(ticker: str, debug: bool = False) -> Optional[Dict[str, Any]]:
             funds["pe_trailing"] = pe_calc
             debug_info["pe_trailing_source"] = "eps_ttm"
 
+    # Dividend yield: upstream else Yahoo trailing dividend events
     if _num(funds.get("dividend_yield"), 0.0) > 0:
         debug_info["dividend_yield_source"] = "upstream"
     else:
@@ -721,6 +831,7 @@ def get_analysis(ticker: str, debug: bool = False) -> Optional[Dict[str, Any]]:
             funds["dividend_yield"] = yld
             debug_info["dividend_yield_source"] = "yahoo_events_trailing"
 
+    # Forward PE: upstream else FMP analyst estimates
     if _num(funds.get("pe_forward"), 0.0) > 0:
         debug_info["pe_forward_source"] = "upstream"
     else:
@@ -729,6 +840,7 @@ def get_analysis(ticker: str, debug: bool = False) -> Optional[Dict[str, Any]]:
             funds["pe_forward"] = pe_fwd
             debug_info["pe_forward_source"] = "fmp_analyst_estimates"
 
+    # Chart cache 6h (Yahoo)
     chart_key = _ck(f"chart:{ticker}")
     chart = get_json(chart_key)
     if chart:
@@ -740,6 +852,7 @@ def get_analysis(ticker: str, debug: bool = False) -> Optional[Dict[str, Any]]:
             chart = {"candles": [], "global_high": None, "global_low": None, "globalhigh": None, "globallow": None}
         set_json(chart_key, chart, ttl_seconds=6 * 3600)
 
+    # Ensure keys exist
     funds.setdefault("pe_trailing", 0.0)
     funds.setdefault("pe_forward", 0.0)
     funds.setdefault("price_to_book", 0.0)
@@ -753,6 +866,7 @@ def get_analysis(ticker: str, debug: bool = False) -> Optional[Dict[str, Any]]:
 
     score = scorer.evaluate(_for_scoring(funds))
 
+    # Frontend legacy keys
     fundamentals_clean = {k: v for k, v in funds.items() if not str(k).startswith("__")}
     fundamentals_clean.update(
         {
