@@ -8,10 +8,12 @@ from typing import Optional, Dict, Any, List
 from cache_upstash import get_json, set_json
 from scoring import StockScorer
 
-CACHE_VERSION = "v16"
+CACHE_VERSION = "v17"
 
 ALPHAVANTAGE_API_KEY = (os.getenv("ALPHAVANTAGE_API_KEY") or os.getenv("ALPHA_VANTAGE_API_KEY") or "").strip()
 LOG_UPSTREAM = (os.getenv("LOG_UPSTREAM") or "0").strip() == "1"
+
+AV_MIN_INTERVAL_SEC = 1.1  # AlphaVantage recommends ~1 call/sec on free tier [web:200]
 
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -30,6 +32,8 @@ sess.headers.update(
 )
 
 scorer = StockScorer()
+
+_last_av_call_ts = 0.0
 
 
 def _ck(key: str) -> str:
@@ -186,7 +190,6 @@ def _yahoo_chart_5y_monthly(ticker: str) -> Optional[Dict[str, Any]]:
         if ym not in by_month:
             by_month[ym] = {"date": ym, "open": o, "high": h, "low": l, "close": c}
         else:
-            # merge duplicates within the same month (keep first open, last close)
             by_month[ym]["high"] = max(by_month[ym]["high"], h)
             by_month[ym]["low"] = min(by_month[ym]["low"], l)
             by_month[ym]["close"] = c
@@ -205,14 +208,23 @@ def _yahoo_chart_5y_monthly(ticker: str) -> Optional[Dict[str, Any]]:
         "candles": candles,
         "global_high": global_high,
         "global_low": global_low,
-        "globalhigh": global_high,  # backward compat
-        "globallow": global_low,    # backward compat
+        "globalhigh": global_high,
+        "globallow": global_low,
     }
 
 
 # -------------------------
-# Alpha Vantage: OVERVIEW + EARNINGS only
+# Alpha Vantage throttled calls
 # -------------------------
+def _av_throttle():
+    global _last_av_call_ts
+    now = time.time()
+    wait = (_last_av_call_ts + AV_MIN_INTERVAL_SEC) - now
+    if wait > 0:
+        time.sleep(wait)
+    _last_av_call_ts = time.time()
+
+
 def _av_get(function_name: str, ticker: str, ttl_seconds: int) -> (Optional[Dict[str, Any]], str):
     if not ALPHAVANTAGE_API_KEY:
         return None, "missing_key"
@@ -223,6 +235,8 @@ def _av_get(function_name: str, ticker: str, ttl_seconds: int) -> (Optional[Dict
     if isinstance(cached, dict) and cached:
         return cached, "cache"
 
+    _av_throttle()
+
     url = "https://www.alphavantage.co/query"
     params = {"function": function_name, "symbol": ticker, "apikey": ALPHAVANTAGE_API_KEY}
     data = _safe_get_json(url, params=params, timeout=25)
@@ -230,7 +244,6 @@ def _av_get(function_name: str, ticker: str, ttl_seconds: int) -> (Optional[Dict
     if not isinstance(data, dict) or not data:
         return None, "empty"
 
-    # throttle / messaging payloads
     if "Note" in data:
         return None, "note:" + str(data.get("Note"))[:160]
     if "Information" in data:
@@ -247,7 +260,6 @@ def _av_overview_parsed(ticker: str) -> (Dict[str, Any], str):
     if not data:
         return {}, status
 
-    # These fields are part of Alpha Vantage OVERVIEW payload (names are exact)
     out = {
         "market_cap": _num(data.get("MarketCapitalization"), 0.0),
         "pe_trailing": _num(data.get("PERatio"), 0.0),
@@ -318,7 +330,6 @@ def get_analysis(ticker: str, debug: bool = False) -> Optional[Dict[str, Any]]:
     ov, ov_status = _av_overview_parsed(ticker)
     debug_info["av_overview_status"] = ov_status
 
-    # If we can’t get price/52w AND can’t get overview, serve last-good or fail.
     if not meta and not ov:
         last_good = get_json(_ck(f"analysis:lastgood:{ticker}"))
         if last_good:
@@ -330,6 +341,15 @@ def get_analysis(ticker: str, debug: bool = False) -> Optional[Dict[str, Any]]:
 
     eps_hist, earn_status = _av_eps_history_5q(ticker)
     debug_info["av_earnings_status"] = earn_status
+
+    # If earnings got throttled, try to preserve EPS history from lastgood
+    if not eps_hist and earn_status.startswith(("info:", "note:")):
+        last_good = get_json(_ck(f"analysis:lastgood:{ticker}"))
+        if isinstance(last_good, dict):
+            try:
+                eps_hist = (last_good.get("fundamentals") or {}).get("epshistory5q") or []
+            except Exception:
+                eps_hist = []
 
     fundamentals: Dict[str, Any] = {
         "symbol": ticker,
@@ -349,7 +369,6 @@ def get_analysis(ticker: str, debug: bool = False) -> Optional[Dict[str, Any]]:
         "eps_history_5q": eps_hist,
     }
 
-    # Chart cache 6h
     chart_key = _ck(f"chart:{ticker}")
     chart = get_json(chart_key)
     if chart:
@@ -363,7 +382,6 @@ def get_analysis(ticker: str, debug: bool = False) -> Optional[Dict[str, Any]]:
 
     score = scorer.evaluate(_for_scoring(fundamentals))
 
-    # Backward compat keys expected by your frontend
     fundamentals_clean = dict(fundamentals)
     fundamentals_clean.update(
         {
