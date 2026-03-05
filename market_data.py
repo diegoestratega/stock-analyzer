@@ -1,13 +1,13 @@
 import os
 import time
 import requests
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from typing import Optional, Dict, Any, List, Tuple
 
 from cache_upstash import get_json, set_json
 from scoring import StockScorer
 
-CACHE_VERSION = "v8"  # bump to bust cache
+CACHE_VERSION = "v9"  # bump to bust caches
 
 FMP_API_KEY = (os.getenv("FMP_API_KEY") or os.getenv("FMPAPIKEY") or "").strip()
 
@@ -88,7 +88,7 @@ def _merge_fill_missing(primary: Dict[str, Any], secondary: Dict[str, Any]) -> D
 
 
 # -------------------------
-# Yahoo meta quote (via chart meta)
+# Yahoo: quote-ish data via chart meta (works for you)
 # -------------------------
 def _yahoo_meta_quote(ticker: str) -> Optional[Dict[str, Any]]:
     cache_key = _ck(f"yahoo:meta:{ticker}")
@@ -125,6 +125,65 @@ def _yahoo_meta_quote(ticker: str) -> Optional[Dict[str, Any]]:
 
     set_json(cache_key, out, ttl_seconds=5 * 60)
     return out
+
+
+def _yahoo_dividend_yield_from_events(ticker: str, price: float) -> Tuple[float, float]:
+    """
+    Uses Yahoo chart dividend events to compute trailing 12M dividend and yield.
+    Returns: (annual_dividend_per_share_trailing, dividend_yield_pct)
+    """
+    if not price:
+        return 0.0, 0.0
+
+    cache_key = _ck(f"yahoo:divtrail:{ticker}")
+    cached = get_json(cache_key)
+    if cached and isinstance(cached, dict):
+        return _num(cached.get("annual_div", 0.0)), _num(cached.get("yield_pct", 0.0))
+
+    # events=div|split is supported on chart endpoints [web:116]
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+    data = _safe_get_json(
+        url,
+        params={
+            "range": "2y",
+            "interval": "1d",
+            "events": "div|split",
+            "includePrePost": "false",
+        },
+        timeout=18,
+    )
+    if not data:
+        return 0.0, 0.0
+
+    result = (((data.get("chart") or {}).get("result")) or [])
+    if not result:
+        return 0.0, 0.0
+
+    events = (result[0] or {}).get("events") or {}
+    divs = events.get("dividends") or {}
+    if not isinstance(divs, dict) or not divs:
+        return 0.0, 0.0
+
+    cutoff = datetime.utcnow() - timedelta(days=365)
+    total = 0.0
+
+    for _, v in divs.items():
+        if not isinstance(v, dict):
+            continue
+        ts = v.get("date")
+        amt = _num(v.get("amount"), 0.0)
+        if not ts or amt <= 0:
+            continue
+        try:
+            d = datetime.utcfromtimestamp(int(ts))
+        except Exception:
+            continue
+        if d >= cutoff:
+            total += amt
+
+    yld = (total / float(price)) * 100.0 if (price and total) else 0.0
+    set_json(cache_key, {"annual_div": total, "yield_pct": yld}, ttl_seconds=6 * 3600)
+    return total, yld
 
 
 def _yahoo_chart_5y_monthly(ticker: str) -> Optional[Dict[str, Any]]:
@@ -257,6 +316,76 @@ def _fmp_balance_sheet_annual_1(ticker: str) -> Tuple[bool, Dict[str, Any]]:
     return True, out
 
 
+def _fmp_forward_pe_from_analyst_estimates(ticker: str, price: float) -> float:
+    """
+    Uses FMP stable analyst-estimates endpoint to approximate forward PE:
+    forward PE ≈ price / next-fy estimated EPS avg.
+    Endpoint exists on FMP APIs (v3 and stable variants); here we use stable. [web:119][web:102]
+    """
+    if not price or not FMP_API_KEY:
+        return 0.0
+
+    cache_key = _ck(f"fmp:pefwd:{ticker}")
+    cached = get_json(cache_key)
+    if cached and isinstance(cached, dict):
+        return _num(cached.get("pe_forward", 0.0))
+
+    data = _fmp_stable_get(
+        "analyst-estimates",
+        {
+            "symbol": ticker,
+            "period": "annual",
+            "page": 0,
+            "limit": 6,
+        },
+    )
+    if not isinstance(data, list) or not data:
+        return 0.0
+
+    # pick the nearest future year, otherwise the latest row with EPS estimate
+    current_year = date.today().year
+    best_eps = 0.0
+    best_year = None
+
+    for r in data:
+        if not isinstance(r, dict):
+            continue
+        y = r.get("date") or r.get("year")
+        yr = None
+        if isinstance(y, int):
+            yr = y
+        elif isinstance(y, str):
+            try:
+                yr = int(y[:4])
+            except Exception:
+                yr = None
+
+        eps = _num(
+            r.get("estimatedEpsAvg")
+            or r.get("estimatedEPSAvg")
+            or r.get("epsEstimatedAverage")
+            or r.get("epsAvg")
+            or 0.0,
+            0.0,
+        )
+        if eps <= 0:
+            continue
+
+        if yr is not None and yr >= current_year:
+            if best_year is None or yr < best_year:
+                best_year = yr
+                best_eps = eps
+        elif best_year is None and eps > 0:
+            best_eps = eps
+
+    if best_eps <= 0:
+        return 0.0
+
+    pe_fwd = float(price) / float(best_eps)
+    set_json(cache_key, {"pe_forward": pe_fwd}, ttl_seconds=24 * 3600)
+    return pe_fwd
+
+
 def _compute_pe_from_eps_ttm(price: float, eps_history_5q: List[Dict[str, Any]]) -> float:
     if not price or not eps_history_5q:
         return 0.0
@@ -271,7 +400,7 @@ def _compute_pe_from_eps_ttm(price: float, eps_history_5q: List[Dict[str, Any]])
     return float(price) / float(eps_ttm)
 
 
-def _fmp_enrich_5q(ticker: str, price: float) -> Dict[str, Any]:
+def _fmp_enrich_5q(ticker: str) -> Dict[str, Any]:
     cache_key = _ck(f"fmp:enrich:{ticker}")
     cached = get_json(cache_key)
     if cached:
@@ -354,12 +483,15 @@ def get_analysis(ticker: str, debug: bool = False) -> Optional[Dict[str, Any]]:
         "quote_source": None,
         "fmp_quote_ok": None,
         "yahoo_meta_ok": None,
-        "enrich_source": None,
+        "fmp_bs_ok": None,
         "fmp_q_ok": None,
         "fmp_a_ok": None,
-        "fmp_bs_ok": None,
-        "pe_from_eps_ttm_used": False,
+        "dividend_yield_source": "none",
+        "pe_trailing_source": "none",
+        "pe_forward_source": "none",
         "chart_source": None,
+        "bs_equity": None,
+        "bs_total_debt": None,
     }
 
     fmp_q = _fmp_quote_stable(ticker) if FMP_API_KEY else None
@@ -385,18 +517,22 @@ def get_analysis(ticker: str, debug: bool = False) -> Optional[Dict[str, Any]]:
             return last_good
         return None
 
-    enrich = _fmp_enrich_5q(ticker, price=_num(quote.get("price", 0.0))) if FMP_API_KEY else {}
-    debug_info["enrich_source"] = "fmp" if FMP_API_KEY else "none"
+    price = _num(quote.get("price"), 0.0)
+
+    enrich = _fmp_enrich_5q(ticker) if FMP_API_KEY else {}
     debug_info["fmp_q_ok"] = bool(enrich.get("__q_ok"))
     debug_info["fmp_a_ok"] = bool(enrich.get("__a_ok"))
 
     funds = _merge_fill_missing(quote, {k: v for k, v in enrich.items() if not str(k).startswith("__")})
 
-    # Balance-sheet derived DE + PB
+    # Balance sheet -> D/E + computed P/B
     bs_calc = {}
     if FMP_API_KEY:
         bs_ok, bs_calc = _fmp_balance_sheet_annual_1(ticker)
         debug_info["fmp_bs_ok"] = bool(bs_ok)
+        if isinstance(bs_calc, dict):
+            debug_info["bs_equity"] = bs_calc.get("__equity")
+            debug_info["bs_total_debt"] = bs_calc.get("__total_debt")
         funds = _merge_fill_missing(funds, bs_calc)
 
         equity = _num(bs_calc.get("__equity"), 0.0)
@@ -406,12 +542,32 @@ def get_analysis(ticker: str, debug: bool = False) -> Optional[Dict[str, Any]]:
     else:
         debug_info["fmp_bs_ok"] = False
 
-    # Compute trailing PE from EPS TTM if still missing
-    if _num(funds.get("pe_trailing"), 0.0) <= 0:
-        pe_calc = _compute_pe_from_eps_ttm(_num(funds.get("price"), 0.0), funds.get("eps_history_5q") or [])
+    # Trailing PE: prefer upstream; else compute from EPS TTM
+    if _num(funds.get("pe_trailing"), 0.0) > 0:
+        debug_info["pe_trailing_source"] = "upstream"
+    else:
+        pe_calc = _compute_pe_from_eps_ttm(price, funds.get("eps_history_5q") or [])
         if pe_calc > 0:
             funds["pe_trailing"] = pe_calc
-            debug_info["pe_from_eps_ttm_used"] = True
+            debug_info["pe_trailing_source"] = "eps_ttm"
+
+    # Dividend yield: prefer upstream; else compute from Yahoo dividend events
+    if _num(funds.get("dividend_yield"), 0.0) > 0:
+        debug_info["dividend_yield_source"] = "upstream"
+    else:
+        annual_div, yld = _yahoo_dividend_yield_from_events(ticker, price)
+        if yld > 0:
+            funds["dividend_yield"] = yld
+            debug_info["dividend_yield_source"] = "yahoo_events_trailing"
+
+    # Forward PE: prefer upstream; else compute from FMP analyst estimates
+    if _num(funds.get("pe_forward"), 0.0) > 0:
+        debug_info["pe_forward_source"] = "upstream"
+    else:
+        pe_fwd = _fmp_forward_pe_from_analyst_estimates(ticker, price)
+        if pe_fwd > 0:
+            funds["pe_forward"] = pe_fwd
+            debug_info["pe_forward_source"] = "fmp_analyst_estimates"
 
     # Chart cache 6h
     chart_key = _ck(f"chart:{ticker}")
@@ -442,7 +598,7 @@ def get_analysis(ticker: str, debug: bool = False) -> Optional[Dict[str, Any]]:
     # Strip internal __* fields from fundamentals output
     fundamentals_clean = {k: v for k, v in funds.items() if not str(k).startswith("__")}
 
-    # Legacy compatibility keys for frontend
+    # Legacy keys for frontend (your app.js reads these) [file:14]
     fundamentals_clean.update(
         {
             "marketcap": fundamentals_clean.get("market_cap", 0),
@@ -462,11 +618,7 @@ def get_analysis(ticker: str, debug: bool = False) -> Optional[Dict[str, Any]]:
     )
 
     out = {"ticker": ticker, "fundamentals": fundamentals_clean, "chart": chart, "score": score}
-
     if debug:
-        # Put BS internals in debug only (useful for validation)
-        debug_info["bs_equity"] = bs_calc.get("__equity") if isinstance(bs_calc, dict) else None
-        debug_info["bs_total_debt"] = bs_calc.get("__total_debt") if isinstance(bs_calc, dict) else None
         out["debug"] = debug_info
 
     set_json(main_key, out, ttl_seconds=5 * 60)
