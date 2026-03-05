@@ -1,11 +1,19 @@
 {
-  "version": 2,
-  "builds": [
-    { "src": "index.py", "use": "@vercel/python" }
+  "rewrites": [
+    {
+      "source": "/api/(.*)",
+      "destination": "/api/index.py"
+    }
   ],
-  "routes": [
-    { "src": "/api/(.*)", "dest": "index.py" },
-    { "handle": "filesystem" },
-    { "src": "/(.*)", "dest": "index.py" }
+  "headers": [
+    {
+      "source": "/app.js",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=31536000, immutable"
+        }
+      ]
+    }
   ]
 }
