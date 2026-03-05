@@ -2,23 +2,22 @@ import os
 import time
 import random
 import requests
-from datetime import datetime, date, timedelta
-from typing import Optional, Dict, Any, List, Tuple
+from datetime import datetime
+from typing import Optional, Dict, Any, List
 
 from cache_upstash import get_json, set_json
 from scoring import StockScorer
 
-CACHE_VERSION = "v15"
+CACHE_VERSION = "v16"
 
 ALPHAVANTAGE_API_KEY = (os.getenv("ALPHAVANTAGE_API_KEY") or os.getenv("ALPHA_VANTAGE_API_KEY") or "").strip()
+LOG_UPSTREAM = (os.getenv("LOG_UPSTREAM") or "0").strip() == "1"
 
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/122.0.0.0 Safari/537.36"
 )
-
-LOG_UPSTREAM = (os.getenv("LOG_UPSTREAM") or "0").strip() == "1"
 
 sess = requests.Session()
 sess.headers.update(
@@ -81,6 +80,7 @@ def _safe_get_json(url: str, params=None, timeout=22) -> Optional[Any]:
     for attempt in range(4):
         try:
             r = sess.get(url, params=params, timeout=timeout, allow_redirects=True)
+
             if LOG_UPSTREAM:
                 print("HTTP", r.status_code, r.request.method, _redact_url(r.url))
 
@@ -88,7 +88,7 @@ def _safe_get_json(url: str, params=None, timeout=22) -> Optional[Any]:
                 try:
                     return r.json()
                 except Exception as e:
-                    print("JSON_ERR", type(e).__name__, _redact_url(url))
+                    print("JSON_ERR", type(e).__name__, _redact_url(r.url))
                     try:
                         print("BODY200", (r.text or "")[:200])
                     except Exception:
@@ -104,6 +104,7 @@ def _safe_get_json(url: str, params=None, timeout=22) -> Optional[Any]:
             if r.status_code in (429, 500, 502, 503, 504):
                 _sleep_jitter(attempt)
                 continue
+
             return None
         except Exception as e:
             print("REQ_ERR", type(e).__name__, _redact_url(url))
@@ -112,19 +113,8 @@ def _safe_get_json(url: str, params=None, timeout=22) -> Optional[Any]:
     return None
 
 
-def _merge_fill_missing(primary: Dict[str, Any], secondary: Dict[str, Any]) -> Dict[str, Any]:
-    out = dict(primary or {})
-    sec = secondary or {}
-    for k, v in sec.items():
-        cur = out.get(k)
-        missing = (cur is None) or (cur == 0) or (cur == 0.0) or (cur == "") or (cur == [])
-        if missing and v not in (None, "", [], 0, 0.0):
-            out[k] = v
-    return out
-
-
 # -------------------------
-# Yahoo chart (works for you)
+# Yahoo: price + 52w + chart
 # -------------------------
 def _yahoo_meta_quote(ticker: str) -> Optional[Dict[str, Any]]:
     cache_key = _ck(f"yahoo:meta:{ticker}")
@@ -148,7 +138,6 @@ def _yahoo_meta_quote(ticker: str) -> Optional[Dict[str, Any]]:
     out = {
         "symbol": ticker,
         "price": _num(meta.get("regularMarketPrice") or meta.get("chartPreviousClose") or 0, 0.0),
-        "market_cap": _num(meta.get("marketCap"), 0.0),  # may be missing; we use AV for this
         "high_52w": _num(meta.get("fiftyTwoWeekHigh"), 0.0),
         "low_52w": _num(meta.get("fiftyTwoWeekLow"), 0.0),
     }
@@ -179,7 +168,7 @@ def _yahoo_chart_5y_monthly(ticker: str) -> Optional[Dict[str, Any]]:
     lows = q0.get("low") or []
     closes = q0.get("close") or []
 
-    candles: List[Dict[str, Any]] = []
+    by_month: Dict[str, Dict[str, Any]] = {}
     global_high = None
     global_low = None
 
@@ -188,18 +177,29 @@ def _yahoo_chart_5y_monthly(ticker: str) -> Optional[Dict[str, Any]]:
         o, h, l, c = opens[i], highs[i], lows[i], closes[i]
         if o is None or h is None or l is None or c is None:
             continue
+
         d = datetime.utcfromtimestamp(ts[i])
         ym = f"{d.year:04d}-{d.month:02d}"
-        candle = {"date": ym, "open": _num(o), "high": _num(h), "low": _num(l), "close": _num(c)}
-        candles.append(candle)
 
-        if global_high is None or candle["high"] > global_high["price"]:
-            global_high = {"price": candle["high"], "date": candle["date"]}
-        if global_low is None or candle["low"] < global_low["price"]:
-            global_low = {"price": candle["low"], "date": candle["date"]}
+        o = _num(o); h = _num(h); l = _num(l); c = _num(c)
 
+        if ym not in by_month:
+            by_month[ym] = {"date": ym, "open": o, "high": h, "low": l, "close": c}
+        else:
+            # merge duplicates within the same month (keep first open, last close)
+            by_month[ym]["high"] = max(by_month[ym]["high"], h)
+            by_month[ym]["low"] = min(by_month[ym]["low"], l)
+            by_month[ym]["close"] = c
+
+    candles = [by_month[k] for k in sorted(by_month.keys())]
     if not candles:
         return None
+
+    for c in candles:
+        if global_high is None or c["high"] > global_high["price"]:
+            global_high = {"price": c["high"], "date": c["date"]}
+        if global_low is None or c["low"] < global_low["price"]:
+            global_low = {"price": c["low"], "date": c["date"]}
 
     return {
         "candles": candles,
@@ -211,154 +211,73 @@ def _yahoo_chart_5y_monthly(ticker: str) -> Optional[Dict[str, Any]]:
 
 
 # -------------------------
-# Alpha Vantage fundamentals
+# Alpha Vantage: OVERVIEW + EARNINGS only
 # -------------------------
-def _av_get(function_name: str, ticker: str, ttl_seconds: int) -> Optional[Dict[str, Any]]:
+def _av_get(function_name: str, ticker: str, ttl_seconds: int) -> (Optional[Dict[str, Any]], str):
     if not ALPHAVANTAGE_API_KEY:
-        return None
+        return None, "missing_key"
 
     ticker = (ticker or "").upper().strip()
     cache_key = _ck(f"av:{function_name}:{ticker}")
     cached = get_json(cache_key)
-    if cached:
-        return cached
+    if isinstance(cached, dict) and cached:
+        return cached, "cache"
 
     url = "https://www.alphavantage.co/query"
     params = {"function": function_name, "symbol": ticker, "apikey": ALPHAVANTAGE_API_KEY}
     data = _safe_get_json(url, params=params, timeout=25)
 
-    # Alpha Vantage returns rate-limit messages inside JSON sometimes.
-    if isinstance(data, dict):
-        if "Note" in data or "Information" in data:
-            print("AV_LIMIT", function_name, ticker, str(data.get("Note") or data.get("Information"))[:140])
-            return None
-
     if not isinstance(data, dict) or not data:
-        return None
+        return None, "empty"
+
+    # throttle / messaging payloads
+    if "Note" in data:
+        return None, "note:" + str(data.get("Note"))[:160]
+    if "Information" in data:
+        return None, "info:" + str(data.get("Information"))[:160]
+    if "Error Message" in data:
+        return None, "error:" + str(data.get("Error Message"))[:160]
 
     set_json(cache_key, data, ttl_seconds=ttl_seconds)
-    return data
+    return data, "ok"
 
 
-def _av_overview_fields(ticker: str) -> Dict[str, Any]:
-    data = _av_get("OVERVIEW", ticker, ttl_seconds=24 * 3600)
+def _av_overview_parsed(ticker: str) -> (Dict[str, Any], str):
+    data, status = _av_get("OVERVIEW", ticker, ttl_seconds=24 * 3600)
     if not data:
-        return {}
+        return {}, status
 
-    return {
+    # These fields are part of Alpha Vantage OVERVIEW payload (names are exact)
+    out = {
         "market_cap": _num(data.get("MarketCapitalization"), 0.0),
         "pe_trailing": _num(data.get("PERatio"), 0.0),
         "price_to_book": _num(data.get("PriceToBookRatio"), 0.0),
         "dividend_yield": _pct_from_frac(_num(data.get("DividendYield"), 0.0)),
+        "debt_to_equity": _num(data.get("DebtToEquity"), 0.0),
+        "revenue_growth_quarterly_yoy": _num(data.get("QuarterlyRevenueGrowthYOY"), 0.0),
+        "eps_growth_quarterly_yoy": _num(data.get("QuarterlyEarningsGrowthYOY"), 0.0),
     }
+    return out, status
 
 
-def _av_income_quarterly(ticker: str) -> List[Dict[str, Any]]:
-    data = _av_get("INCOME_STATEMENT", ticker, ttl_seconds=12 * 3600)
+def _av_eps_history_5q(ticker: str) -> (List[Dict[str, Any]], str):
+    data, status = _av_get("EARNINGS", ticker, ttl_seconds=12 * 3600)
     if not data:
-        return []
-    rows = data.get("quarterlyReports")
-    if not isinstance(rows, list):
-        return []
-    rows = [r for r in rows if isinstance(r, dict)]
-    rows.sort(key=lambda r: (r.get("fiscalDateEnding") or ""), reverse=True)
-    return rows
+        return [], status
 
-
-def _av_balance_quarterly(ticker: str) -> List[Dict[str, Any]]:
-    data = _av_get("BALANCE_SHEET", ticker, ttl_seconds=24 * 3600)
-    if not data:
-        return []
-    rows = data.get("quarterlyReports")
-    if not isinstance(rows, list):
-        return []
-    rows = [r for r in rows if isinstance(r, dict)]
-    rows.sort(key=lambda r: (r.get("fiscalDateEnding") or ""), reverse=True)
-    return rows
-
-
-def _av_earnings_quarterly(ticker: str) -> List[Dict[str, Any]]:
-    data = _av_get("EARNINGS", ticker, ttl_seconds=12 * 3600)
-    if not data:
-        return []
     rows = data.get("quarterlyEarnings")
     if not isinstance(rows, list):
-        return []
+        return [], "bad_shape"
+
     rows = [r for r in rows if isinstance(r, dict)]
     rows.sort(key=lambda r: (r.get("fiscalDateEnding") or ""), reverse=True)
-    return rows
 
-
-def _compute_debt_to_equity(balance_rows: List[Dict[str, Any]]) -> float:
-    if not balance_rows:
-        return 0.0
-    r0 = balance_rows[0] or {}
-
-    equity = _num(r0.get("totalShareholderEquity"), 0.0)
-    if equity <= 0:
-        return 0.0
-
-    debt = _num(r0.get("shortLongTermDebtTotal"), 0.0)
-    if debt <= 0:
-        debt = _num(r0.get("shortTermDebt"), 0.0) + _num(r0.get("longTermDebt"), 0.0)
-
-    # fallback if debt fields are missing: use total liabilities
-    if debt <= 0:
-        debt = _num(r0.get("totalLiabilities"), 0.0)
-
-    return (debt / equity) if debt > 0 else 0.0
-
-
-def _compute_quarterly_yoy_growth(latest: float, year_ago: float) -> float:
-    if year_ago == 0:
-        return 0.0
-    return ((latest - year_ago) / abs(year_ago)) * 100.0
-
-
-def _enrich_growth_eps(ticker: str) -> Dict[str, Any]:
-    out = {
-        "revenue_growth_annual_yoy": 0.0,
-        "revenue_growth_quarterly_yoy": 0.0,
-        "eps_growth_annual_yoy": 0.0,
-        "eps_growth_quarterly_yoy": 0.0,
-        "eps_history_5q": [],
-    }
-
-    inc = _av_income_quarterly(ticker)
-    earn = _av_earnings_quarterly(ticker)
-
-    # Revenue growth quarterly YoY from income statement (q0 vs q4)
-    if len(inc) >= 5:
-        rev0 = _num(inc[0].get("totalRevenue"), 0.0)
-        rev4 = _num(inc[4].get("totalRevenue"), 0.0)
-        out["revenue_growth_quarterly_yoy"] = _compute_quarterly_yoy_growth(rev0, rev4)
-
-    # EPS history + EPS growth quarterly YoY from earnings endpoint
-    eps_hist: List[Dict[str, Any]] = []
-    if earn:
-        for r in earn[:5]:
-            d = (r.get("fiscalDateEnding") or r.get("reportedDate") or "Unknown")[:10]
-            eps = _num(r.get("reportedEPS"), 0.0)
-            eps_hist.append({"date": d, "eps": eps})
-        out["eps_history_5q"] = eps_hist
-
-        if len(earn) >= 5:
-            eps0 = _num(earn[0].get("reportedEPS"), 0.0)
-            eps4 = _num(earn[4].get("reportedEPS"), 0.0)
-            out["eps_growth_quarterly_yoy"] = _compute_quarterly_yoy_growth(eps0, eps4)
-
-    # “Annual YoY” (TTM vs prior TTM) — optional; keep simple if we have 8 quarters
-    if len(inc) >= 8:
-        rev_ttm1 = sum(_num(inc[i].get("totalRevenue"), 0.0) for i in range(0, 4))
-        rev_ttm2 = sum(_num(inc[i].get("totalRevenue"), 0.0) for i in range(4, 8))
-        out["revenue_growth_annual_yoy"] = _compute_quarterly_yoy_growth(rev_ttm1, rev_ttm2)
-
-    if len(earn) >= 8:
-        eps_ttm1 = sum(_num(earn[i].get("reportedEPS"), 0.0) for i in range(0, 4))
-        eps_ttm2 = sum(_num(earn[i].get("reportedEPS"), 0.0) for i in range(4, 8))
-        out["eps_growth_annual_yoy"] = _compute_quarterly_yoy_growth(eps_ttm1, eps_ttm2)
-
-    return out
+    out: List[Dict[str, Any]] = []
+    for r in rows[:5]:
+        d = (r.get("fiscalDateEnding") or "Unknown")[:10]
+        eps = _num(r.get("reportedEPS"), 0.0)
+        out.append({"date": d, "eps": eps})
+    return out, "ok"
 
 
 def _for_scoring(f: Dict[str, Any]) -> Dict[str, Any]:
@@ -388,32 +307,19 @@ def get_analysis(ticker: str, debug: bool = False) -> Optional[Dict[str, Any]]:
         "cache_version": CACHE_VERSION,
         "av_key_present": bool(ALPHAVANTAGE_API_KEY),
         "yahoo_meta_ok": False,
-        "av_overview_ok": False,
-        "av_income_ok": False,
-        "av_balance_ok": False,
-        "av_earnings_ok": False,
+        "av_overview_status": None,
+        "av_earnings_status": None,
         "chart_source": None,
     }
 
-    # Price + 52w from Yahoo chart meta (this endpoint has been working for you)
     meta = _yahoo_meta_quote(ticker)
     debug_info["yahoo_meta_ok"] = bool(meta)
 
-    # Alpha Vantage for fundamentals
-    overview = _av_overview_fields(ticker)
-    debug_info["av_overview_ok"] = bool(overview)
+    ov, ov_status = _av_overview_parsed(ticker)
+    debug_info["av_overview_status"] = ov_status
 
-    bal = _av_balance_quarterly(ticker)
-    debug_info["av_balance_ok"] = bool(bal)
-
-    inc = _av_income_quarterly(ticker)
-    debug_info["av_income_ok"] = bool(inc)
-
-    earn = _av_earnings_quarterly(ticker)
-    debug_info["av_earnings_ok"] = bool(earn)
-
-    # If we have neither Yahoo meta nor AV overview, we can’t proceed
-    if not meta and not overview:
+    # If we can’t get price/52w AND can’t get overview, serve last-good or fail.
+    if not meta and not ov:
         last_good = get_json(_ck(f"analysis:lastgood:{ticker}"))
         if last_good:
             last_good["stale"] = True
@@ -422,24 +328,28 @@ def get_analysis(ticker: str, debug: bool = False) -> Optional[Dict[str, Any]]:
             return last_good
         return None
 
+    eps_hist, earn_status = _av_eps_history_5q(ticker)
+    debug_info["av_earnings_status"] = earn_status
+
     fundamentals: Dict[str, Any] = {
         "symbol": ticker,
         "price": _num((meta or {}).get("price"), 0.0),
         "high_52w": _num((meta or {}).get("high_52w"), 0.0),
         "low_52w": _num((meta or {}).get("low_52w"), 0.0),
-        "market_cap": _num((overview or {}).get("market_cap"), 0.0),
-        "pe_trailing": _num((overview or {}).get("pe_trailing"), 0.0),
+        "market_cap": _num(ov.get("market_cap"), 0.0),
+        "pe_trailing": _num(ov.get("pe_trailing"), 0.0),
         "pe_forward": 0.0,
-        "price_to_book": _num((overview or {}).get("price_to_book"), 0.0),
-        "dividend_yield": _num((overview or {}).get("dividend_yield"), 0.0),
+        "price_to_book": _num(ov.get("price_to_book"), 0.0),
+        "dividend_yield": _num(ov.get("dividend_yield"), 0.0),
+        "debt_to_equity": _num(ov.get("debt_to_equity"), 0.0),
+        "revenue_growth_quarterly_yoy": _num(ov.get("revenue_growth_quarterly_yoy"), 0.0),
+        "eps_growth_quarterly_yoy": _num(ov.get("eps_growth_quarterly_yoy"), 0.0),
+        "revenue_growth_annual_yoy": 0.0,
+        "eps_growth_annual_yoy": 0.0,
+        "eps_history_5q": eps_hist,
     }
 
-    fundamentals["debt_to_equity"] = _compute_debt_to_equity(bal) if bal else 0.0
-
-    enrich = _enrich_growth_eps(ticker)
-    fundamentals = _merge_fill_missing(fundamentals, enrich)
-
-    # Chart cache 6h (Yahoo)
+    # Chart cache 6h
     chart_key = _ck(f"chart:{ticker}")
     chart = get_json(chart_key)
     if chart:
@@ -453,7 +363,7 @@ def get_analysis(ticker: str, debug: bool = False) -> Optional[Dict[str, Any]]:
 
     score = scorer.evaluate(_for_scoring(fundamentals))
 
-    # Backward compat keys expected by frontend
+    # Backward compat keys expected by your frontend
     fundamentals_clean = dict(fundamentals)
     fundamentals_clean.update(
         {
