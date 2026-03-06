@@ -8,7 +8,7 @@ from typing import Optional, Dict, Any, List, Tuple
 from cache_upstash import get_json, set_json
 from scoring import StockScorer
 
-CACHE_VERSION = "v19"
+CACHE_VERSION = "v20"
 
 ALPHAVANTAGE_API_KEY = (os.getenv("ALPHAVANTAGE_API_KEY") or os.getenv("ALPHA_VANTAGE_API_KEY") or "").strip()
 LOG_UPSTREAM = (os.getenv("LOG_UPSTREAM") or "0").strip() == "1"
@@ -96,17 +96,15 @@ def _safe_get_json(url: str, params=None, timeout=22) -> Optional[Any]:
             if r.status_code == 200:
                 try:
                     return r.json()
-                except Exception as e:
-                    print("JSON_ERR", type(e).__name__, _redact_url(r.url))
+                except Exception:
                     try:
-                        print("BODY200", (r.text or "")[:200])
+                        print("JSON_ERR", _redact_url(r.url), (r.text or "")[:200])
                     except Exception:
                         pass
                     return None
 
-            print("HTTP_ERR", r.status_code, r.request.method, _redact_url(r.url))
             try:
-                print("BODY", (r.text or "")[:200])
+                print("HTTP_ERR", r.status_code, r.request.method, _redact_url(r.url), (r.text or "")[:200])
             except Exception:
                 pass
 
@@ -115,8 +113,7 @@ def _safe_get_json(url: str, params=None, timeout=22) -> Optional[Any]:
                 continue
 
             return None
-        except Exception as e:
-            print("REQ_ERR", type(e).__name__, _redact_url(url))
+        except Exception:
             _sleep_jitter(attempt)
 
     return None
@@ -372,6 +369,72 @@ def _av_eps_history_5q(ticker: str) -> Tuple[List[Dict[str, Any]], str]:
     return out, "ok"
 
 
+def _av_income_growths(ticker: str) -> Tuple[Dict[str, Any], str]:
+    data, status = _av_get("INCOME_STATEMENT", ticker, ttl_seconds=24 * 3600)
+    if not data:
+        return {}, status
+
+    rows = data.get("quarterlyReports")
+    if not isinstance(rows, list):
+        return {}, "bad_shape"
+
+    rows = [r for r in rows if isinstance(r, dict)]
+    rows.sort(key=lambda r: (r.get("fiscalDateEnding") or ""), reverse=True)
+
+    out = {
+        "revenue_growth_quarterly_yoy": None,
+        "revenue_growth_annual_yoy": None,
+    }
+
+    if len(rows) >= 5:
+        rev0 = _num(rows[0].get("totalRevenue"), 0.0)
+        rev4 = _num(rows[4].get("totalRevenue"), 0.0)
+        if rev4 != 0:
+            out["revenue_growth_quarterly_yoy"] = (rev0 - rev4) / abs(rev4)
+
+    if len(rows) >= 8:
+        rev_ttm_1 = sum(_num(rows[i].get("totalRevenue"), 0.0) for i in range(4))
+        rev_ttm_2 = sum(_num(rows[i].get("totalRevenue"), 0.0) for i in range(4, 8))
+        if rev_ttm_2 != 0:
+            out["revenue_growth_annual_yoy"] = (rev_ttm_1 - rev_ttm_2) / abs(rev_ttm_2)
+
+    return out, "ok"
+
+
+def _av_earnings_growths(ticker: str) -> Tuple[Dict[str, Any], str]:
+    data, status = _av_get("EARNINGS", ticker, ttl_seconds=12 * 3600)
+    if not data:
+        return {}, status
+
+    rows = data.get("quarterlyEarnings")
+    if not isinstance(rows, list):
+        return {}, "bad_shape"
+
+    rows = [r for r in rows if isinstance(r, dict)]
+    rows.sort(key=lambda r: (r.get("fiscalDateEnding") or ""), reverse=True)
+
+    out = {
+        "eps_growth_quarterly_yoy": None,
+        "eps_growth_annual_yoy": None,
+    }
+
+    eps_vals = [_num(r.get("reportedEPS"), 0.0) for r in rows]
+
+    if len(eps_vals) >= 5:
+        eps0 = eps_vals[0]
+        eps4 = eps_vals[4]
+        if eps4 != 0:
+            out["eps_growth_quarterly_yoy"] = (eps0 - eps4) / abs(eps4)
+
+    if len(eps_vals) >= 8:
+        eps_ttm_1 = sum(eps_vals[i] for i in range(4))
+        eps_ttm_2 = sum(eps_vals[i] for i in range(4, 8))
+        if eps_ttm_2 != 0:
+            out["eps_growth_annual_yoy"] = (eps_ttm_1 - eps_ttm_2) / abs(eps_ttm_2)
+
+    return out, "ok"
+
+
 def _for_scoring(f: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "price": f.get("price", 0) or 0,
@@ -402,6 +465,7 @@ def get_analysis(ticker: str, debug: bool = False) -> Optional[Dict[str, Any]]:
         "yahoo_quote_ok": False,
         "av_overview_status": None,
         "av_balance_status": None,
+        "av_income_status": None,
         "av_earnings_status": None,
         "chart_source": None,
     }
@@ -432,8 +496,12 @@ def get_analysis(ticker: str, debug: bool = False) -> Optional[Dict[str, Any]]:
             debt_to_equity = _num(de_fallback, 0.0)
     debug_info["av_balance_status"] = bal_status
 
+    income_growths, income_status = _av_income_growths(ticker)
+    debug_info["av_income_status"] = income_status
+
     eps_hist, earn_status = _av_eps_history_5q(ticker)
-    debug_info["av_earnings_status"] = earn_status
+    eps_growths, earn_growth_status = _av_earnings_growths(ticker)
+    debug_info["av_earnings_status"] = earn_status if earn_status == earn_growth_status else f"{earn_status}|{earn_growth_status}"
 
     if not eps_hist and str(earn_status).startswith(("info:", "note:")):
         last_good = get_json(_ck(f"analysis:lastgood:{ticker}"))
@@ -442,6 +510,14 @@ def get_analysis(ticker: str, debug: bool = False) -> Optional[Dict[str, Any]]:
                 eps_hist = (last_good.get("fundamentals") or {}).get("epshistory5q") or []
             except Exception:
                 eps_hist = []
+
+    rev_qtr = income_growths.get("revenue_growth_quarterly_yoy")
+    if rev_qtr is None:
+        rev_qtr = ov.get("revenue_growth_quarterly_yoy")
+
+    eps_qtr = eps_growths.get("eps_growth_quarterly_yoy")
+    if eps_qtr is None:
+        eps_qtr = ov.get("eps_growth_quarterly_yoy")
 
     fundamentals: Dict[str, Any] = {
         "symbol": ticker,
@@ -456,11 +532,10 @@ def get_analysis(ticker: str, debug: bool = False) -> Optional[Dict[str, Any]]:
         "dividend_yield": _num(ov.get("dividend_yield") if _has_pos(ov.get("dividend_yield")) else (quote or {}).get("dividend_yield"), 0.0),
 
         "debt_to_equity": _num(debt_to_equity, 0.0),
-        "revenue_growth_quarterly_yoy": _num(ov.get("revenue_growth_quarterly_yoy"), 0.0),
-        "eps_growth_quarterly_yoy": _num(ov.get("eps_growth_quarterly_yoy"), 0.0),
-
-        "revenue_growth_annual_yoy": None,
-        "eps_growth_annual_yoy": None,
+        "revenue_growth_quarterly_yoy": rev_qtr,
+        "eps_growth_quarterly_yoy": eps_qtr,
+        "revenue_growth_annual_yoy": income_growths.get("revenue_growth_annual_yoy"),
+        "eps_growth_annual_yoy": eps_growths.get("eps_growth_annual_yoy"),
         "eps_history_5q": eps_hist,
     }
 
@@ -489,9 +564,9 @@ def get_analysis(ticker: str, debug: bool = False) -> Optional[Dict[str, Any]]:
             "pricetobook": fundamentals_clean.get("price_to_book", 0),
             "debttoequity": fundamentals_clean.get("debt_to_equity", 0),
             "revenuegrowthannualyoy": fundamentals_clean.get("revenue_growth_annual_yoy"),
-            "revenuegrowthquarterlyyoy": fundamentals_clean.get("revenue_growth_quarterly_yoy", 0),
+            "revenuegrowthquarterlyyoy": fundamentals_clean.get("revenue_growth_quarterly_yoy"),
             "epsgrowthannualyoy": fundamentals_clean.get("eps_growth_annual_yoy"),
-            "epsgrowthquarterlyyoy": fundamentals_clean.get("eps_growth_quarterly_yoy", 0),
+            "epsgrowthquarterlyyoy": fundamentals_clean.get("eps_growth_quarterly_yoy"),
             "epshistory5q": fundamentals_clean.get("eps_history_5q", []),
         }
     )

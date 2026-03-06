@@ -370,12 +370,12 @@
         return null;
       }
 
-      function hasPositive(v) {
-        return typeof v === "number" && isFinite(v) && v > 0;
-      }
-
       function isRealNumber(v) {
         return typeof v === "number" && isFinite(v);
+      }
+
+      function hasPositive(v) {
+        return isRealNumber(v) && v > 0;
       }
 
       function formatMoney(num) {
@@ -386,9 +386,14 @@
         return `$${num.toLocaleString()}`;
       }
 
-      function formatPct(num) {
+      function formatPercent(num) {
         if (!isRealNumber(num)) return "N/A";
         return `${num.toFixed(2)}%`;
+      }
+
+      function formatGrowthPercent(num) {
+        if (!isRealNumber(num)) return "N/A";
+        return `${(num * 100).toFixed(2)}%`;
       }
 
       function formatMaybeNumber(num, decimals = 2) {
@@ -403,13 +408,7 @@
         btn.disabled = true;
 
         try {
-          let response;
-          try {
-            response = await fetch(`/api/analyze?ticker=${encodeURIComponent(ticker)}`);
-          } catch (networkError) {
-            throw new Error("Could not reach the deployed API.");
-          }
-
+          const response = await fetch(`/api/analyze?ticker=${encodeURIComponent(ticker)}`);
           const data = await response.json();
 
           if (!response.ok) {
@@ -423,12 +422,21 @@
             drawChart(data.chart);
           }, 100);
         } catch (error) {
-          errorMsg.textContent = error.message;
+          errorMsg.textContent = error.message || "Unknown error";
           errorMsg.classList.remove("hidden");
         } finally {
           btn.textContent = "Analyze";
           btn.disabled = false;
         }
+      }
+
+      function setGrowthCell(el, value) {
+        el.textContent = formatGrowthPercent(value);
+        if (!isRealNumber(value)) {
+          el.style.color = "var(--text)";
+          return;
+        }
+        el.style.color = value >= 0 ? "var(--success)" : "var(--danger)";
       }
 
       function populateDashboard(data) {
@@ -459,27 +467,15 @@
         document.getElementById("val-pe-trail").textContent = formatMaybeNumber(peTrailing);
         document.getElementById("val-pe-fwd").textContent = formatMaybeNumber(peForward);
         document.getElementById("val-pb").textContent = formatMaybeNumber(pb);
-        document.getElementById("val-de").textContent = hasPositive(de) ? de.toFixed(2) : "N/A";
-        document.getElementById("val-div").textContent = hasPositive(divYield) ? formatPct(divYield) : "None";
-
+        document.getElementById("val-de").textContent = isRealNumber(de) ? de.toFixed(2) : "N/A";
+        document.getElementById("val-div").textContent = hasPositive(divYield) ? formatPercent(divYield) : "None";
         document.getElementById("val-1y-high").textContent = hasPositive(high1y) ? `$${high1y.toFixed(2)}` : "N/A";
         document.getElementById("val-1y-low").textContent = hasPositive(low1y) ? `$${low1y.toFixed(2)}` : "N/A";
 
-        const revgAnn = document.getElementById("val-revg-ann");
-        revgAnn.textContent = formatPct(revAnn);
-        revgAnn.style.color = isRealNumber(revAnn) ? (revAnn >= 0 ? "var(--success)" : "var(--danger)") : "var(--text)";
-
-        const revgQtr = document.getElementById("val-revg-qtr");
-        revgQtr.textContent = formatPct(revQtr);
-        revgQtr.style.color = isRealNumber(revQtr) ? (revQtr >= 0 ? "var(--success)" : "var(--danger)") : "var(--text)";
-
-        const epsgAnn = document.getElementById("val-epsg-ann");
-        epsgAnn.textContent = formatPct(epsAnn);
-        epsgAnn.style.color = isRealNumber(epsAnn) ? (epsAnn >= 0 ? "var(--success)" : "var(--danger)") : "var(--text)";
-
-        const epsgQtr = document.getElementById("val-epsg-qtr");
-        epsgQtr.textContent = formatPct(epsQtr);
-        epsgQtr.style.color = isRealNumber(epsQtr) ? (epsQtr >= 0 ? "var(--success)" : "var(--danger)") : "var(--text)";
+        setGrowthCell(document.getElementById("val-revg-ann"), revAnn);
+        setGrowthCell(document.getElementById("val-revg-qtr"), revQtr);
+        setGrowthCell(document.getElementById("val-epsg-ann"), epsAnn);
+        setGrowthCell(document.getElementById("val-epsg-qtr"), epsQtr);
 
         const tbody = document.querySelector("#eps-table tbody");
         tbody.innerHTML = "";
@@ -493,7 +489,7 @@
           tbody.appendChild(tr);
         });
 
-        const numericScore = pick(score.finalgrade, score.totalScore, 0);
+        const numericScore = pick(score.finalgrade, score.total_score, score.totalScore, 0);
         const scoreNum = document.getElementById("score-number");
         scoreNum.textContent = isRealNumber(numericScore) ? numericScore.toFixed(1) : "--";
 
