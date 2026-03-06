@@ -8,7 +8,7 @@ from typing import Optional, Dict, Any, List, Tuple
 from cache_upstash import get_json, set_json
 from scoring import StockScorer
 
-CACHE_VERSION = "v18"
+CACHE_VERSION = "v19"
 
 ALPHAVANTAGE_API_KEY = (os.getenv("ALPHAVANTAGE_API_KEY") or os.getenv("ALPHA_VANTAGE_API_KEY") or "").strip()
 LOG_UPSTREAM = (os.getenv("LOG_UPSTREAM") or "0").strip() == "1"
@@ -313,6 +313,7 @@ def _av_overview_parsed(ticker: str) -> Tuple[Dict[str, Any], str]:
     out = {
         "market_cap": _num(data.get("MarketCapitalization"), 0.0),
         "pe_trailing": _num(data.get("PERatio"), 0.0),
+        "pe_forward": _num(data.get("ForwardPE"), 0.0),
         "price_to_book": _num(data.get("PriceToBookRatio"), 0.0),
         "dividend_yield": _pct_from_frac(_num(data.get("DividendYield"), 0.0)),
         "debt_to_equity": _num(data.get("DebtToEquity"), 0.0),
@@ -450,7 +451,7 @@ def get_analysis(ticker: str, debug: bool = False) -> Optional[Dict[str, Any]]:
 
         "market_cap": _num(ov.get("market_cap") if _has_pos(ov.get("market_cap")) else (quote or {}).get("market_cap"), 0.0),
         "pe_trailing": _num(ov.get("pe_trailing") if _has_pos(ov.get("pe_trailing")) else (quote or {}).get("pe_trailing"), 0.0),
-        "pe_forward": _num((quote or {}).get("pe_forward"), 0.0),
+        "pe_forward": _num(ov.get("pe_forward") if _has_pos(ov.get("pe_forward")) else (quote or {}).get("pe_forward"), 0.0),
         "price_to_book": _num(ov.get("price_to_book") if _has_pos(ov.get("price_to_book")) else (quote or {}).get("price_to_book"), 0.0),
         "dividend_yield": _num(ov.get("dividend_yield") if _has_pos(ov.get("dividend_yield")) else (quote or {}).get("dividend_yield"), 0.0),
 
