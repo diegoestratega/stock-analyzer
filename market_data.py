@@ -3,17 +3,16 @@ import time
 import random
 import requests
 from datetime import datetime
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 
 from cache_upstash import get_json, set_json
 from scoring import StockScorer
 
-CACHE_VERSION = "v17"
+CACHE_VERSION = "v18"
 
 ALPHAVANTAGE_API_KEY = (os.getenv("ALPHAVANTAGE_API_KEY") or os.getenv("ALPHA_VANTAGE_API_KEY") or "").strip()
 LOG_UPSTREAM = (os.getenv("LOG_UPSTREAM") or "0").strip() == "1"
-
-AV_MIN_INTERVAL_SEC = 1.1  # AlphaVantage recommends ~1 call/sec on free tier [web:200]
+AV_MIN_INTERVAL_SEC = 1.1
 
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -32,7 +31,6 @@ sess.headers.update(
 )
 
 scorer = StockScorer()
-
 _last_av_call_ts = 0.0
 
 
@@ -47,11 +45,18 @@ def _num(x, dflt=0.0) -> float:
         if isinstance(x, (int, float)):
             return float(x)
         s = str(x).strip()
-        if s in ("", "None", "null", "NaN", "-"):
+        if s in ("", "None", "null", "NaN", "-", "N/A"):
             return dflt
         return float(s)
     except Exception:
         return dflt
+
+
+def _has_pos(x) -> bool:
+    try:
+        return x is not None and float(x) > 0
+    except Exception:
+        return False
 
 
 def _pct_from_frac(v: float) -> float:
@@ -62,7 +67,7 @@ def _pct_from_frac(v: float) -> float:
 
 
 def _sleep_jitter(attempt: int, cap: float = 12.0):
-    time.sleep(min(cap, (2**attempt) + 0.5 + random.random()))
+    time.sleep(min(cap, (2 ** attempt) + 0.5 + random.random()))
 
 
 def _redact_url(u: str) -> str:
@@ -118,7 +123,7 @@ def _safe_get_json(url: str, params=None, timeout=22) -> Optional[Any]:
 
 
 # -------------------------
-# Yahoo: price + 52w + chart
+# Yahoo
 # -------------------------
 def _yahoo_meta_quote(ticker: str) -> Optional[Dict[str, Any]]:
     cache_key = _ck(f"yahoo:meta:{ticker}")
@@ -148,6 +153,48 @@ def _yahoo_meta_quote(ticker: str) -> Optional[Dict[str, Any]]:
 
     set_json(cache_key, out, ttl_seconds=60)
     return out
+
+
+def _yahoo_quote_snapshot(ticker: str) -> Optional[Dict[str, Any]]:
+    cache_key = _ck(f"yahoo:quote:{ticker}")
+    cached = get_json(cache_key)
+    if cached:
+        return cached
+
+    for base in (
+        "https://query1.finance.yahoo.com/v7/finance/quote",
+        "https://query1.finance.yahoo.com/v6/finance/quote",
+    ):
+        data = _safe_get_json(base, params={"symbols": ticker}, timeout=18)
+        if not data:
+            continue
+
+        res = ((data.get("quoteResponse") or {}).get("result")) or []
+        if not res:
+            continue
+
+        q = res[0] or {}
+        price = q.get("regularMarketPrice") or q.get("postMarketPrice") or q.get("preMarketPrice") or 0
+        div_yield = q.get("dividendYield") or 0
+        if div_yield and div_yield < 1:
+            div_yield = div_yield * 100
+
+        out = {
+            "symbol": ticker,
+            "price": _num(price, 0.0),
+            "market_cap": _num(q.get("marketCap"), 0.0),
+            "high_52w": _num(q.get("fiftyTwoWeekHigh"), 0.0),
+            "low_52w": _num(q.get("fiftyTwoWeekLow"), 0.0),
+            "pe_trailing": _num(q.get("trailingPE"), 0.0),
+            "pe_forward": _num(q.get("forwardPE"), 0.0),
+            "dividend_yield": _num(div_yield, 0.0),
+            "price_to_book": _num(q.get("priceToBook"), 0.0),
+        }
+
+        set_json(cache_key, out, ttl_seconds=300)
+        return out
+
+    return None
 
 
 def _yahoo_chart_5y_monthly(ticker: str) -> Optional[Dict[str, Any]]:
@@ -185,7 +232,10 @@ def _yahoo_chart_5y_monthly(ticker: str) -> Optional[Dict[str, Any]]:
         d = datetime.utcfromtimestamp(ts[i])
         ym = f"{d.year:04d}-{d.month:02d}"
 
-        o = _num(o); h = _num(h); l = _num(l); c = _num(c)
+        o = _num(o)
+        h = _num(h)
+        l = _num(l)
+        c = _num(c)
 
         if ym not in by_month:
             by_month[ym] = {"date": ym, "open": o, "high": h, "low": l, "close": c}
@@ -214,7 +264,7 @@ def _yahoo_chart_5y_monthly(ticker: str) -> Optional[Dict[str, Any]]:
 
 
 # -------------------------
-# Alpha Vantage throttled calls
+# Alpha Vantage
 # -------------------------
 def _av_throttle():
     global _last_av_call_ts
@@ -225,7 +275,7 @@ def _av_throttle():
     _last_av_call_ts = time.time()
 
 
-def _av_get(function_name: str, ticker: str, ttl_seconds: int) -> (Optional[Dict[str, Any]], str):
+def _av_get(function_name: str, ticker: str, ttl_seconds: int) -> Tuple[Optional[Dict[str, Any]], str]:
     if not ALPHAVANTAGE_API_KEY:
         return None, "missing_key"
 
@@ -255,7 +305,7 @@ def _av_get(function_name: str, ticker: str, ttl_seconds: int) -> (Optional[Dict
     return data, "ok"
 
 
-def _av_overview_parsed(ticker: str) -> (Dict[str, Any], str):
+def _av_overview_parsed(ticker: str) -> Tuple[Dict[str, Any], str]:
     data, status = _av_get("OVERVIEW", ticker, ttl_seconds=24 * 3600)
     if not data:
         return {}, status
@@ -272,7 +322,36 @@ def _av_overview_parsed(ticker: str) -> (Dict[str, Any], str):
     return out, status
 
 
-def _av_eps_history_5q(ticker: str) -> (List[Dict[str, Any]], str):
+def _av_balance_sheet_debt_to_equity(ticker: str) -> Tuple[Optional[float], str]:
+    data, status = _av_get("BALANCE_SHEET", ticker, ttl_seconds=24 * 3600)
+    if not data:
+        return None, status
+
+    rows = data.get("quarterlyReports")
+    if not isinstance(rows, list) or not rows:
+        return None, "bad_shape"
+
+    rows = [r for r in rows if isinstance(r, dict)]
+    rows.sort(key=lambda r: (r.get("fiscalDateEnding") or ""), reverse=True)
+    r = rows[0] if rows else {}
+
+    equity = _num(r.get("totalShareholderEquity"), 0.0)
+    if equity <= 0:
+        return None, "no_equity"
+
+    debt_candidates = [
+        _num(r.get("shortLongTermDebtTotal"), 0.0),
+        _num(r.get("shortTermDebt"), 0.0) + _num(r.get("longTermDebt"), 0.0),
+        _num(r.get("currentLongTermDebt"), 0.0) + _num(r.get("longTermDebt"), 0.0),
+    ]
+    total_debt = max(debt_candidates) if debt_candidates else 0.0
+    if total_debt <= 0:
+        return 0.0, "ok"
+
+    return total_debt / equity, "ok"
+
+
+def _av_eps_history_5q(ticker: str) -> Tuple[List[Dict[str, Any]], str]:
     data, status = _av_get("EARNINGS", ticker, ttl_seconds=12 * 3600)
     if not data:
         return [], status
@@ -319,18 +398,23 @@ def get_analysis(ticker: str, debug: bool = False) -> Optional[Dict[str, Any]]:
         "cache_version": CACHE_VERSION,
         "av_key_present": bool(ALPHAVANTAGE_API_KEY),
         "yahoo_meta_ok": False,
+        "yahoo_quote_ok": False,
         "av_overview_status": None,
+        "av_balance_status": None,
         "av_earnings_status": None,
         "chart_source": None,
     }
 
     meta = _yahoo_meta_quote(ticker)
+    quote = _yahoo_quote_snapshot(ticker)
+
     debug_info["yahoo_meta_ok"] = bool(meta)
+    debug_info["yahoo_quote_ok"] = bool(quote)
 
     ov, ov_status = _av_overview_parsed(ticker)
     debug_info["av_overview_status"] = ov_status
 
-    if not meta and not ov:
+    if not meta and not quote and not ov:
         last_good = get_json(_ck(f"analysis:lastgood:{ticker}"))
         if last_good:
             last_good["stale"] = True
@@ -339,11 +423,18 @@ def get_analysis(ticker: str, debug: bool = False) -> Optional[Dict[str, Any]]:
             return last_good
         return None
 
+    debt_to_equity = _num(ov.get("debt_to_equity"), 0.0)
+    bal_status = "skipped"
+    if not _has_pos(debt_to_equity):
+        de_fallback, bal_status = _av_balance_sheet_debt_to_equity(ticker)
+        if de_fallback is not None:
+            debt_to_equity = _num(de_fallback, 0.0)
+    debug_info["av_balance_status"] = bal_status
+
     eps_hist, earn_status = _av_eps_history_5q(ticker)
     debug_info["av_earnings_status"] = earn_status
 
-    # If earnings got throttled, try to preserve EPS history from lastgood
-    if not eps_hist and earn_status.startswith(("info:", "note:")):
+    if not eps_hist and str(earn_status).startswith(("info:", "note:")):
         last_good = get_json(_ck(f"analysis:lastgood:{ticker}"))
         if isinstance(last_good, dict):
             try:
@@ -353,19 +444,22 @@ def get_analysis(ticker: str, debug: bool = False) -> Optional[Dict[str, Any]]:
 
     fundamentals: Dict[str, Any] = {
         "symbol": ticker,
-        "price": _num((meta or {}).get("price"), 0.0),
-        "high_52w": _num((meta or {}).get("high_52w"), 0.0),
-        "low_52w": _num((meta or {}).get("low_52w"), 0.0),
-        "market_cap": _num(ov.get("market_cap"), 0.0),
-        "pe_trailing": _num(ov.get("pe_trailing"), 0.0),
-        "pe_forward": 0.0,
-        "price_to_book": _num(ov.get("price_to_book"), 0.0),
-        "dividend_yield": _num(ov.get("dividend_yield"), 0.0),
-        "debt_to_equity": _num(ov.get("debt_to_equity"), 0.0),
+        "price": _num((meta or {}).get("price") or (quote or {}).get("price"), 0.0),
+        "high_52w": _num((meta or {}).get("high_52w") or (quote or {}).get("high_52w"), 0.0),
+        "low_52w": _num((meta or {}).get("low_52w") or (quote or {}).get("low_52w"), 0.0),
+
+        "market_cap": _num(ov.get("market_cap") if _has_pos(ov.get("market_cap")) else (quote or {}).get("market_cap"), 0.0),
+        "pe_trailing": _num(ov.get("pe_trailing") if _has_pos(ov.get("pe_trailing")) else (quote or {}).get("pe_trailing"), 0.0),
+        "pe_forward": _num((quote or {}).get("pe_forward"), 0.0),
+        "price_to_book": _num(ov.get("price_to_book") if _has_pos(ov.get("price_to_book")) else (quote or {}).get("price_to_book"), 0.0),
+        "dividend_yield": _num(ov.get("dividend_yield") if _has_pos(ov.get("dividend_yield")) else (quote or {}).get("dividend_yield"), 0.0),
+
+        "debt_to_equity": _num(debt_to_equity, 0.0),
         "revenue_growth_quarterly_yoy": _num(ov.get("revenue_growth_quarterly_yoy"), 0.0),
         "eps_growth_quarterly_yoy": _num(ov.get("eps_growth_quarterly_yoy"), 0.0),
-        "revenue_growth_annual_yoy": 0.0,
-        "eps_growth_annual_yoy": 0.0,
+
+        "revenue_growth_annual_yoy": None,
+        "eps_growth_annual_yoy": None,
         "eps_history_5q": eps_hist,
     }
 
@@ -393,9 +487,9 @@ def get_analysis(ticker: str, debug: bool = False) -> Optional[Dict[str, Any]]:
             "dividendyield": fundamentals_clean.get("dividend_yield", 0),
             "pricetobook": fundamentals_clean.get("price_to_book", 0),
             "debttoequity": fundamentals_clean.get("debt_to_equity", 0),
-            "revenuegrowthannualyoy": fundamentals_clean.get("revenue_growth_annual_yoy", 0),
+            "revenuegrowthannualyoy": fundamentals_clean.get("revenue_growth_annual_yoy"),
             "revenuegrowthquarterlyyoy": fundamentals_clean.get("revenue_growth_quarterly_yoy", 0),
-            "epsgrowthannualyoy": fundamentals_clean.get("eps_growth_annual_yoy", 0),
+            "epsgrowthannualyoy": fundamentals_clean.get("eps_growth_annual_yoy"),
             "epsgrowthquarterlyyoy": fundamentals_clean.get("eps_growth_quarterly_yoy", 0),
             "epshistory5q": fundamentals_clean.get("eps_history_5q", []),
         }

@@ -4,8 +4,6 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Stock Fundamentals Analyzer</title>
-
-  <!-- Lightweight Charts CDN -->
   <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
 
   <style>
@@ -22,8 +20,7 @@
     }
 
     body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
-        Helvetica, Arial, sans-serif;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
       background-color: var(--bg);
       color: var(--text);
       margin: 0;
@@ -47,7 +44,7 @@
     .app-header h1 {
       font-size: 26px;
       margin: 0;
-      color: #ffffff;
+      color: #fff;
       letter-spacing: 1px;
     }
 
@@ -60,7 +57,7 @@
     input {
       background: var(--surface);
       border: 1px solid var(--border);
-      color: #ffffff;
+      color: #fff;
       padding: 10px 15px;
       border-radius: 6px;
       font-size: 16px;
@@ -71,7 +68,7 @@
 
     button {
       background: var(--primary);
-      color: #ffffff;
+      color: #fff;
       border: none;
       padding: 10px 25px;
       border-radius: 6px;
@@ -272,12 +269,7 @@
     <div class="app-header">
       <h1>Stock Fundamentals Analyzer</h1>
       <div class="search-bar">
-        <input
-          type="text"
-          id="ticker-input"
-          placeholder="TICKER e.g. AAPL"
-          autocomplete="off"
-        />
+        <input type="text" id="ticker-input" placeholder="TICKER e.g. AAPL" autocomplete="off" />
         <button id="analyze-btn">Analyze</button>
       </div>
     </div>
@@ -285,68 +277,31 @@
     <div id="error-message" class="error hidden"></div>
 
     <div id="dashboard" class="dashboard hidden">
-      <!-- Left column -->
       <div class="left-col panel">
         <div class="symbol-header">
           <div>
             <h1 id="stock-symbol">--</h1>
-            <a
-              id="stockanalysis-link"
-              class="ext-link"
-              target="_blank"
-              href="#"
-              >View on StockAnalysis</a
-            >
+            <a id="stockanalysis-link" class="ext-link" target="_blank" href="#">View on StockAnalysis</a>
           </div>
           <h2 id="stock-price">--</h2>
         </div>
 
         <h3>Key Metrics</h3>
         <div class="metrics-grid">
-          <div class="metric">
-            <span class="label">Market Cap</span>
-            <span class="value" id="val-mcap">--</span>
-          </div>
-          <div class="metric">
-            <span class="label">Div Yield</span>
-            <span class="value" id="val-div">--</span>
-          </div>
-          <div class="metric">
-            <span class="label">PE Trail</span>
-            <span class="value" id="val-pe-trail">--</span>
-          </div>
-          <div class="metric">
-            <span class="label">PE Fwd</span>
-            <span class="value" id="val-pe-fwd">--</span>
-          </div>
-          <div class="metric">
-            <span class="label">Debt/Equity</span>
-            <span class="value" id="val-de">--</span>
-          </div>
-          <div class="metric">
-            <span class="label">Price/Book</span>
-            <span class="value" id="val-pb">--</span>
-          </div>
+          <div class="metric"><span class="label">Market Cap</span><span class="value" id="val-mcap">--</span></div>
+          <div class="metric"><span class="label">Div Yield</span><span class="value" id="val-div">--</span></div>
+          <div class="metric"><span class="label">PE Trail</span><span class="value" id="val-pe-trail">--</span></div>
+          <div class="metric"><span class="label">PE Fwd</span><span class="value" id="val-pe-fwd">--</span></div>
+          <div class="metric"><span class="label">Debt/Equity</span><span class="value" id="val-de">--</span></div>
+          <div class="metric"><span class="label">Price/Book</span><span class="value" id="val-pb">--</span></div>
         </div>
 
         <h3 style="margin-top: 25px;">Growth YoY</h3>
         <div class="metrics-grid">
-          <div class="metric">
-            <span class="label">Rev Growth TTM</span>
-            <span class="value" id="val-revg-ann">--</span>
-          </div>
-          <div class="metric">
-            <span class="label">Rev Growth Qtr</span>
-            <span class="value" id="val-revg-qtr">--</span>
-          </div>
-          <div class="metric">
-            <span class="label">EPS Growth TTM</span>
-            <span class="value" id="val-epsg-ann">--</span>
-          </div>
-          <div class="metric">
-            <span class="label">EPS Growth Qtr</span>
-            <span class="value" id="val-epsg-qtr">--</span>
-          </div>
+          <div class="metric"><span class="label">Rev Growth Annual</span><span class="value" id="val-revg-ann">--</span></div>
+          <div class="metric"><span class="label">Rev Growth Qtr</span><span class="value" id="val-revg-qtr">--</span></div>
+          <div class="metric"><span class="label">EPS Growth Annual</span><span class="value" id="val-epsg-ann">--</span></div>
+          <div class="metric"><span class="label">EPS Growth Qtr</span><span class="value" id="val-epsg-qtr">--</span></div>
         </div>
 
         <h3 style="margin-top: 25px;">EPS Hist Last 5 Qtrs</h3>
@@ -361,7 +316,6 @@
         </table>
       </div>
 
-      <!-- Middle column (chart) -->
       <div class="mid-col panel">
         <div class="chart-header">
           <div class="header-spacer"></div>
@@ -369,18 +323,9 @@
             <span id="score-number">--</span>
             <span id="score-rating"></span>
           </div>
-          <div
-            class="chart-legend"
-            style="flex-direction: column; align-items: flex-end; gap: 4px;"
-          >
-            <div class="legend-item">
-              1Y High:
-              <span class="legend-high" id="val-1y-high">--</span>
-            </div>
-            <div class="legend-item">
-              1Y Low:
-              <span class="legend-low" id="val-1y-low">--</span>
-            </div>
+          <div class="chart-legend" style="flex-direction: column; align-items: flex-end; gap: 4px;">
+            <div class="legend-item">1Y High: <span class="legend-high" id="val-1y-high">--</span></div>
+            <div class="legend-item">1Y Low: <span class="legend-low" id="val-1y-low">--</span></div>
           </div>
         </div>
 
@@ -389,7 +334,6 @@
         </div>
       </div>
 
-      <!-- Right column (score breakdown) -->
       <div class="right-col panel">
         <h3>Score Breakdown</h3>
         <ul id="score-breakdown-list" class="breakdown-list"></ul>
@@ -419,6 +363,39 @@
         }
       });
 
+      function pick(...vals) {
+        for (const v of vals) {
+          if (v !== undefined && v !== null && v !== "") return v;
+        }
+        return null;
+      }
+
+      function hasPositive(v) {
+        return typeof v === "number" && isFinite(v) && v > 0;
+      }
+
+      function isRealNumber(v) {
+        return typeof v === "number" && isFinite(v);
+      }
+
+      function formatMoney(num) {
+        if (!isRealNumber(num) || num <= 0) return "N/A";
+        if (num >= 1e12) return `$${(num / 1e12).toFixed(2)}T`;
+        if (num >= 1e9) return `$${(num / 1e9).toFixed(2)}B`;
+        if (num >= 1e6) return `$${(num / 1e6).toFixed(2)}M`;
+        return `$${num.toLocaleString()}`;
+      }
+
+      function formatPct(num) {
+        if (!isRealNumber(num)) return "N/A";
+        return `${num.toFixed(2)}%`;
+      }
+
+      function formatMaybeNumber(num, decimals = 2) {
+        if (!hasPositive(num)) return "N/A";
+        return num.toFixed(decimals);
+      }
+
       async function fetchAnalysis(ticker) {
         errorMsg.classList.add("hidden");
         dashboard.classList.add("hidden");
@@ -428,14 +405,13 @@
         try {
           let response;
           try {
-            response = await fetch(
-              `/api/analyze?ticker=${encodeURIComponent(ticker)}`
-            );
+            response = await fetch(`/api/analyze?ticker=${encodeURIComponent(ticker)}`);
           } catch (networkError) {
             throw new Error("Could not reach the deployed API.");
           }
 
           const data = await response.json();
+
           if (!response.ok) {
             throw new Error(data.detail || data.error || "Failed to fetch data from API");
           }
@@ -456,92 +432,72 @@
       }
 
       function populateDashboard(data) {
-        const funds = data.fundamentals;
-        const score = data.score;
+        const funds = data.fundamentals || {};
+        const score = data.score || {};
 
-        document.getElementById("stock-symbol").textContent = funds.symbol;
-        document.getElementById("stock-price").textContent =
-          `$${funds.price.toFixed(2)}`;
+        const price = pick(funds.price, 0);
+        const marketCap = pick(funds.marketcap, funds.market_cap);
+        const peTrailing = pick(funds.petrailing, funds.pe_trailing);
+        const peForward = pick(funds.peforward, funds.pe_forward);
+        const pb = pick(funds.pricetobook, funds.price_to_book);
+        const de = pick(funds.debttoequity, funds.debt_to_equity);
+        const divYield = pick(funds.dividendyield, funds.dividend_yield);
+        const high1y = pick(funds.high52w, funds.high_52w);
+        const low1y = pick(funds.low52w, funds.low_52w);
+        const revAnn = pick(funds.revenuegrowthannualyoy, funds.revenue_growth_annual_yoy);
+        const revQtr = pick(funds.revenuegrowthquarterlyyoy, funds.revenue_growth_quarterly_yoy);
+        const epsAnn = pick(funds.epsgrowthannualyoy, funds.eps_growth_annual_yoy);
+        const epsQtr = pick(funds.epsgrowthquarterlyyoy, funds.eps_growth_quarterly_yoy);
+        const epsHistory = pick(funds.epshistory5q, funds.eps_history_5q) || [];
+
+        document.getElementById("stock-symbol").textContent = funds.symbol || "--";
+        document.getElementById("stock-price").textContent = hasPositive(price) ? `$${price.toFixed(2)}` : "N/A";
         document.getElementById("stockanalysis-link").href =
-          `https://stockanalysis.com/stocks/${funds.symbol.toLowerCase()}/financials/?p=quarterly`;
+          `https://stockanalysis.com/stocks/${(funds.symbol || "").toLowerCase()}/financials/?p=quarterly`;
 
-        const formatMoney = (num) => {
-          if (num >= 1e12) return `$${(num / 1e12).toFixed(2)}T`;
-          if (num >= 1e9) return `$${(num / 1e9).toFixed(2)}B`;
-          if (num >= 1e6) return `$${(num / 1e6).toFixed(2)}M`;
-          return `$${num.toLocaleString()}`;
-        };
-        const formatPct = (num) => `${num.toFixed(2)}%`;
+        document.getElementById("val-mcap").textContent = formatMoney(marketCap);
+        document.getElementById("val-pe-trail").textContent = formatMaybeNumber(peTrailing);
+        document.getElementById("val-pe-fwd").textContent = formatMaybeNumber(peForward);
+        document.getElementById("val-pb").textContent = formatMaybeNumber(pb);
+        document.getElementById("val-de").textContent = hasPositive(de) ? de.toFixed(2) : "N/A";
+        document.getElementById("val-div").textContent = hasPositive(divYield) ? formatPct(divYield) : "None";
 
-        document.getElementById("val-mcap").textContent =
-          formatMoney(funds.marketcap || funds.market_cap || 0);
-        document.getElementById("val-pe-trail").textContent =
-          (funds.petrailing || funds.pe_trailing || 0) > 0
-            ? (funds.petrailing || funds.pe_trailing).toFixed(2)
-            : "N/A";
-        document.getElementById("val-pe-fwd").textContent =
-          (funds.peforward || funds.pe_forward || 0) > 0
-            ? (funds.peforward || funds.pe_forward).toFixed(2)
-            : "N/A";
-        document.getElementById("val-pb").textContent =
-          (funds.pricetobook || funds.price_to_book || 0) > 0
-            ? (funds.pricetobook || funds.price_to_book).toFixed(2)
-            : "N/A";
-        document.getElementById("val-de").textContent =
-          (funds.debttoequity || funds.debt_to_equity || 0).toFixed(2);
-        document.getElementById("val-div").textContent =
-          (funds.dividendyield || funds.dividend_yield || 0) > 0
-            ? formatPct(funds.dividendyield || funds.dividend_yield)
-            : "None";
-
-        const high1y = funds.high52w || funds.high_52w || 0;
-        const low1y = funds.low52w || funds.low_52w || 0;
-        document.getElementById("val-1y-high").textContent =
-          high1y > 0 ? `$${high1y.toFixed(2)}` : "N/A";
-        document.getElementById("val-1y-low").textContent =
-          low1y > 0 ? `$${low1y.toFixed(2)}` : "N/A";
-
-        const revAnn = funds.revenuegrowthannualyoy || funds.revenue_growth_annual_yoy || 0;
-        const revQtr = funds.revenuegrowthquarterlyyoy || funds.revenue_growth_quarterly_yoy || 0;
-        const epsAnn = funds.epsgrowthannualyoy || funds.eps_growth_annual_yoy || 0;
-        const epsQtr = funds.epsgrowthquarterlyyoy || funds.eps_growth_quarterly_yoy || 0;
+        document.getElementById("val-1y-high").textContent = hasPositive(high1y) ? `$${high1y.toFixed(2)}` : "N/A";
+        document.getElementById("val-1y-low").textContent = hasPositive(low1y) ? `$${low1y.toFixed(2)}` : "N/A";
 
         const revgAnn = document.getElementById("val-revg-ann");
         revgAnn.textContent = formatPct(revAnn);
-        revgAnn.style.color = revAnn >= 0 ? "var(--success)" : "var(--danger)";
+        revgAnn.style.color = isRealNumber(revAnn) ? (revAnn >= 0 ? "var(--success)" : "var(--danger)") : "var(--text)";
 
         const revgQtr = document.getElementById("val-revg-qtr");
         revgQtr.textContent = formatPct(revQtr);
-        revgQtr.style.color = revQtr >= 0 ? "var(--success)" : "var(--danger)";
+        revgQtr.style.color = isRealNumber(revQtr) ? (revQtr >= 0 ? "var(--success)" : "var(--danger)") : "var(--text)";
 
         const epsgAnn = document.getElementById("val-epsg-ann");
         epsgAnn.textContent = formatPct(epsAnn);
-        epsgAnn.style.color = epsAnn >= 0 ? "var(--success)" : "var(--danger)";
+        epsgAnn.style.color = isRealNumber(epsAnn) ? (epsAnn >= 0 ? "var(--success)" : "var(--danger)") : "var(--text)";
 
         const epsgQtr = document.getElementById("val-epsg-qtr");
         epsgQtr.textContent = formatPct(epsQtr);
-        epsgQtr.style.color = epsQtr >= 0 ? "var(--success)" : "var(--danger)";
+        epsgQtr.style.color = isRealNumber(epsQtr) ? (epsQtr >= 0 ? "var(--success)" : "var(--danger)") : "var(--text)";
 
         const tbody = document.querySelector("#eps-table tbody");
         tbody.innerHTML = "";
-        (funds.epshistory5q || funds.eps_history_5q || []).forEach((q) => {
+        epsHistory.forEach((q) => {
           const tr = document.createElement("tr");
-          const epsVal =
-            typeof q.eps === "number" ? q.eps : Number(q.eps || 0);
+          const epsVal = typeof q.eps === "number" ? q.eps : Number(q.eps || 0);
           tr.innerHTML = `
-            <td>${q.date}</td>
+            <td>${q.date || ""}</td>
             <td>${epsVal.toFixed(2)}</td>
           `;
           tbody.appendChild(tr);
         });
 
+        const numericScore = pick(score.finalgrade, score.totalScore, 0);
         const scoreNum = document.getElementById("score-number");
-        scoreNum.textContent = score.finalgrade?.toFixed
-          ? score.finalgrade.toFixed(1)
-          : score.finalgrade || "--";
+        scoreNum.textContent = isRealNumber(numericScore) ? numericScore.toFixed(1) : "--";
 
         let color = "var(--danger)";
-        const numericScore = score.finalgrade || score.totalScore || 0;
         if (numericScore >= 80) color = "var(--success)";
         else if (numericScore >= 45) color = "var(--warning)";
 
@@ -572,8 +528,7 @@
         }
 
         if (!chartData || !chartData.candles || chartData.candles.length === 0) {
-          container.innerHTML =
-            '<p style="padding:20px; color:#94a3b8;">No chart data available.</p>';
+          container.innerHTML = '<p style="padding:20px; color:#94a3b8;">No chart data available.</p>';
           return;
         }
 
@@ -601,35 +556,24 @@
             vertLines: { color: "#334155" },
             horzLines: { color: "#334155" },
           },
-          crosshair: {
-            mode: 0,
-          },
-          rightPriceScale: {
-            borderColor: "#334155",
-          },
-          timeScale: {
-            borderColor: "#334155",
-            timeVisible: false,
-          },
+          crosshair: { mode: 0 },
+          rightPriceScale: { borderColor: "#334155" },
+          timeScale: { borderColor: "#334155", timeVisible: false },
         });
 
-        const candlestickSeries = tvChart.addSeries(
-          LightweightCharts.CandlestickSeries,
-          {
-            upColor: "#22c55e",
-            downColor: "#ef4444",
-            borderVisible: false,
-            wickUpColor: "#22c55e",
-            wickDownColor: "#ef4444",
-            lastValueVisible: false,
-            priceLineVisible: false,
-          }
-        );
+        const candlestickSeries = tvChart.addSeries(LightweightCharts.CandlestickSeries, {
+          upColor: "#22c55e",
+          downColor: "#ef4444",
+          borderVisible: false,
+          wickUpColor: "#22c55e",
+          wickDownColor: "#ef4444",
+          lastValueVisible: false,
+          priceLineVisible: false,
+        });
 
         candlestickSeries.setData(formattedData);
 
-        const globalHigh =
-          chartData.globalhigh || chartData.global_high || null;
+        const globalHigh = chartData.globalhigh || chartData.global_high || null;
         const globalLow = chartData.globallow || chartData.global_low || null;
 
         if (globalHigh) {
