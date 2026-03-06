@@ -8,9 +8,10 @@ from typing import Optional, Dict, Any, List, Tuple
 from cache_upstash import get_json, set_json
 from scoring import StockScorer
 
-CACHE_VERSION = "v20"
+CACHE_VERSION = "v21"
 
 ALPHAVANTAGE_API_KEY = (os.getenv("ALPHAVANTAGE_API_KEY") or os.getenv("ALPHA_VANTAGE_API_KEY") or "").strip()
+FMP_API_KEY = (os.getenv("FMP_API_KEY") or os.getenv("FMPAPIKEY") or "").strip()
 LOG_UPSTREAM = (os.getenv("LOG_UPSTREAM") or "0").strip() == "1"
 AV_MIN_INTERVAL_SEC = 1.1
 
@@ -315,7 +316,6 @@ def _av_overview_parsed(ticker: str) -> Tuple[Dict[str, Any], str]:
         "dividend_yield": _pct_from_frac(_num(data.get("DividendYield"), 0.0)),
         "debt_to_equity": _num(data.get("DebtToEquity"), 0.0),
         "revenue_growth_quarterly_yoy": _num(data.get("QuarterlyRevenueGrowthYOY"), 0.0),
-        "eps_growth_quarterly_yoy": _num(data.get("QuarterlyEarningsGrowthYOY"), 0.0),
     }
     return out, status
 
@@ -349,26 +349,6 @@ def _av_balance_sheet_debt_to_equity(ticker: str) -> Tuple[Optional[float], str]
     return total_debt / equity, "ok"
 
 
-def _av_eps_history_5q(ticker: str) -> Tuple[List[Dict[str, Any]], str]:
-    data, status = _av_get("EARNINGS", ticker, ttl_seconds=12 * 3600)
-    if not data:
-        return [], status
-
-    rows = data.get("quarterlyEarnings")
-    if not isinstance(rows, list):
-        return [], "bad_shape"
-
-    rows = [r for r in rows if isinstance(r, dict)]
-    rows.sort(key=lambda r: (r.get("fiscalDateEnding") or ""), reverse=True)
-
-    out: List[Dict[str, Any]] = []
-    for r in rows[:5]:
-        d = (r.get("fiscalDateEnding") or "Unknown")[:10]
-        eps = _num(r.get("reportedEPS"), 0.0)
-        out.append({"date": d, "eps": eps})
-    return out, "ok"
-
-
 def _av_income_growths(ticker: str) -> Tuple[Dict[str, Any], str]:
     data, status = _av_get("INCOME_STATEMENT", ticker, ttl_seconds=24 * 3600)
     if not data:
@@ -398,6 +378,26 @@ def _av_income_growths(ticker: str) -> Tuple[Dict[str, Any], str]:
         if rev_ttm_2 != 0:
             out["revenue_growth_annual_yoy"] = (rev_ttm_1 - rev_ttm_2) / abs(rev_ttm_2)
 
+    return out, "ok"
+
+
+def _av_eps_history_5q(ticker: str) -> Tuple[List[Dict[str, Any]], str]:
+    data, status = _av_get("EARNINGS", ticker, ttl_seconds=12 * 3600)
+    if not data:
+        return [], status
+
+    rows = data.get("quarterlyEarnings")
+    if not isinstance(rows, list):
+        return [], "bad_shape"
+
+    rows = [r for r in rows if isinstance(r, dict)]
+    rows.sort(key=lambda r: (r.get("fiscalDateEnding") or ""), reverse=True)
+
+    out: List[Dict[str, Any]] = []
+    for r in rows[:5]:
+        d = (r.get("fiscalDateEnding") or "Unknown")[:10]
+        eps = _num(r.get("reportedEPS"), 0.0)
+        out.append({"date": d, "eps": eps})
     return out, "ok"
 
 
@@ -435,6 +435,77 @@ def _av_earnings_growths(ticker: str) -> Tuple[Dict[str, Any], str]:
     return out, "ok"
 
 
+# -------------------------
+# FMP EPS statement-style data
+# -------------------------
+def _fmp_get(endpoint: str, params: dict) -> Optional[Any]:
+    if not FMP_API_KEY:
+        return None
+    base = "https://financialmodelingprep.com/stable"
+    p = dict(params or {})
+    p["apikey"] = FMP_API_KEY
+    return _safe_get_json(f"{base}/{endpoint}", params=p, timeout=22)
+
+
+def _fmp_eps_value(row: Dict[str, Any]) -> float:
+    if not isinstance(row, dict):
+        return 0.0
+
+    raw = row.get("eps")
+    if raw in (None, "", "None", "null", "NaN", "-", "N/A"):
+        raw = row.get("epsDiluted")
+
+    return _num(raw, 0.0)
+
+
+def _fmp_eps_statement_enrich(ticker: str) -> Tuple[Dict[str, Any], str]:
+    cache_key = _ck(f"fmp:epsstmt:{ticker}")
+    cached = get_json(cache_key)
+    if isinstance(cached, dict) and cached:
+        return cached, "cache"
+
+    if not FMP_API_KEY:
+        return {}, "missing_key"
+
+    data = _fmp_get("income-statement", {"symbol": ticker, "period": "quarter", "limit": 8})
+    if not isinstance(data, list) or not data:
+        return {}, "empty"
+
+    rows = [r for r in data if isinstance(r, dict)]
+    rows.sort(key=lambda r: (r.get("date") or ""), reverse=True)
+
+    out = {
+        "eps_history_5q": [],
+        "eps_growth_quarterly_yoy": None,
+        "eps_growth_annual_yoy": None,
+    }
+
+    out["eps_history_5q"] = [
+        {
+            "date": (r.get("date") or "Unknown")[:10],
+            "eps": _fmp_eps_value(r),
+        }
+        for r in rows[:5]
+    ]
+
+    eps_vals = [_fmp_eps_value(r) for r in rows]
+
+    if len(eps_vals) >= 5:
+        eps0 = eps_vals[0]
+        eps4 = eps_vals[4]
+        if eps4 != 0:
+            out["eps_growth_quarterly_yoy"] = (eps0 - eps4) / abs(eps4)
+
+    if len(eps_vals) >= 8:
+        eps_ttm_1 = sum(eps_vals[i] for i in range(4))
+        eps_ttm_2 = sum(eps_vals[i] for i in range(4, 8))
+        if eps_ttm_2 != 0:
+            out["eps_growth_annual_yoy"] = (eps_ttm_1 - eps_ttm_2) / abs(eps_ttm_2)
+
+    set_json(cache_key, out, ttl_seconds=24 * 3600)
+    return out, "ok"
+
+
 def _for_scoring(f: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "price": f.get("price", 0) or 0,
@@ -461,12 +532,15 @@ def get_analysis(ticker: str, debug: bool = False) -> Optional[Dict[str, Any]]:
     debug_info = {
         "cache_version": CACHE_VERSION,
         "av_key_present": bool(ALPHAVANTAGE_API_KEY),
+        "fmp_key_present": bool(FMP_API_KEY),
         "yahoo_meta_ok": False,
         "yahoo_quote_ok": False,
         "av_overview_status": None,
         "av_balance_status": None,
         "av_income_status": None,
-        "av_earnings_status": None,
+        "fmp_eps_status": None,
+        "av_earnings_fallback_status": None,
+        "eps_source": None,
         "chart_source": None,
     }
 
@@ -499,25 +573,36 @@ def get_analysis(ticker: str, debug: bool = False) -> Optional[Dict[str, Any]]:
     income_growths, income_status = _av_income_growths(ticker)
     debug_info["av_income_status"] = income_status
 
-    eps_hist, earn_status = _av_eps_history_5q(ticker)
-    eps_growths, earn_growth_status = _av_earnings_growths(ticker)
-    debug_info["av_earnings_status"] = earn_status if earn_status == earn_growth_status else f"{earn_status}|{earn_growth_status}"
+    fmp_eps, fmp_eps_status = _fmp_eps_statement_enrich(ticker)
+    debug_info["fmp_eps_status"] = fmp_eps_status
 
-    if not eps_hist and str(earn_status).startswith(("info:", "note:")):
-        last_good = get_json(_ck(f"analysis:lastgood:{ticker}"))
-        if isinstance(last_good, dict):
-            try:
-                eps_hist = (last_good.get("fundamentals") or {}).get("epshistory5q") or []
-            except Exception:
-                eps_hist = []
+    eps_hist = fmp_eps.get("eps_history_5q") or []
+    eps_qtr = fmp_eps.get("eps_growth_quarterly_yoy")
+    eps_ann = fmp_eps.get("eps_growth_annual_yoy")
+
+    if eps_hist or eps_qtr is not None or eps_ann is not None:
+        debug_info["eps_source"] = "fmp_income_statement"
+
+    if not eps_hist or eps_qtr is None or eps_ann is None:
+        av_eps_hist, earn_status = _av_eps_history_5q(ticker)
+        av_eps_growths, earn_growth_status = _av_earnings_growths(ticker)
+        debug_info["av_earnings_fallback_status"] = (
+            earn_status if earn_status == earn_growth_status else f"{earn_status}|{earn_growth_status}"
+        )
+
+        if not eps_hist:
+            eps_hist = av_eps_hist
+        if eps_qtr is None:
+            eps_qtr = av_eps_growths.get("eps_growth_quarterly_yoy")
+        if eps_ann is None:
+            eps_ann = av_eps_growths.get("eps_growth_annual_yoy")
+
+        if debug_info["eps_source"] is None and (eps_hist or eps_qtr is not None or eps_ann is not None):
+            debug_info["eps_source"] = "av_earnings_fallback"
 
     rev_qtr = income_growths.get("revenue_growth_quarterly_yoy")
     if rev_qtr is None:
         rev_qtr = ov.get("revenue_growth_quarterly_yoy")
-
-    eps_qtr = eps_growths.get("eps_growth_quarterly_yoy")
-    if eps_qtr is None:
-        eps_qtr = ov.get("eps_growth_quarterly_yoy")
 
     fundamentals: Dict[str, Any] = {
         "symbol": ticker,
@@ -535,7 +620,7 @@ def get_analysis(ticker: str, debug: bool = False) -> Optional[Dict[str, Any]]:
         "revenue_growth_quarterly_yoy": rev_qtr,
         "eps_growth_quarterly_yoy": eps_qtr,
         "revenue_growth_annual_yoy": income_growths.get("revenue_growth_annual_yoy"),
-        "eps_growth_annual_yoy": eps_growths.get("eps_growth_annual_yoy"),
+        "eps_growth_annual_yoy": eps_ann,
         "eps_history_5q": eps_hist,
     }
 
